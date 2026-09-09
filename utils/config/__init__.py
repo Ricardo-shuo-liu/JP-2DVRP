@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from typing import Any, TypeVar
+from typing import Any, Iterable, TypeVar
 
 
 ConfigType = TypeVar("ConfigType", bound="BaseConfig")
@@ -36,3 +36,34 @@ class BaseConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+def parse_key_value(item: str) -> tuple[str, Any]:
+    """Parse a ``KEY=VALUE`` CLI item into a config key and a Python value."""
+    if "=" not in item:
+        raise ValueError(f"参数 {item!r} 格式应为 KEY=VALUE")
+    key, raw = item.split("=", 1)
+    key = key.strip()
+    raw = raw.strip()
+    if raw in ("True", "true"):
+        value = True
+    elif raw in ("False", "false"):
+        value = False
+    elif raw in ("None", "null"):
+        value = None
+    else:
+        try:
+            value = int(raw)
+        except ValueError:
+            try:
+                value = float(raw)
+            except ValueError:
+                value = raw
+    return key, value
+
+
+def parse_key_values(items: Iterable[str] | None) -> dict[str, Any]:
+    """Parse repeated ``KEY=VALUE`` CLI items into a dictionary."""
+    if not items:
+        return {}
+    return dict(parse_key_value(item) for item in items)

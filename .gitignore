@@ -1,11 +1,9 @@
 logs/
+lightning_logs/
 wandb/
 checkpoints/
 *.npz
-
 .vscode/settings.json
-
-
 __pycache__/
 *.py[cod]
 /build/
@@ -22,4 +20,3 @@ runtime/
 .skill/
 .DS_Store
 .env
-.vscode/settings.json
