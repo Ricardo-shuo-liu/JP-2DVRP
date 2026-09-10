@@ -16,6 +16,13 @@ class Config(BaseConfig):
     num_heads: int = 8
     normalization: str = "batch"
     baseline: str = "auto"  # auto: POMO->shared, 其余->rollout
+    weight_decay: float = 0.0
+    lr_scheduler: str = "none"  # none / multi_step
+    lr_milestones: list[int] = field(default_factory=lambda: [501])
+    lr_gamma: float = 0.1
+    logit_clipping: float = 10.0
+    feedforward_hidden: int = 512
+    num_starts: Optional[int] = None
     generator_params: dict = field(default_factory=dict)
     seed: int = 1234
     val_batch_size: Optional[int] = None

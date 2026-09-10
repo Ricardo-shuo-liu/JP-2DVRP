@@ -50,9 +50,11 @@ def get_model(env, config: Config):
             "num_heads": config.num_heads,
             "normalization": config.normalization,
         }
+        if config.model in ("AttentionModel", "POMO"):
+            policy_kwargs["tanh_clipping"] = config.logit_clipping
+            policy_kwargs["feedforward_hidden"] = config.feedforward_hidden
 
-    return model_cls(
-        env,
+    model_kwargs = dict(
         policy_kwargs=policy_kwargs,
         baseline=baseline,
         batch_size=config.batch_size,
@@ -60,8 +62,24 @@ def get_model(env, config: Config):
         test_batch_size=config.test_batch_size,
         train_data_size=config.train_data_size,
         val_data_size=config.val_data_size,
-        optimizer_kwargs={"lr": config.lr},
+        optimizer_kwargs={
+            "lr": config.lr,
+            "weight_decay": config.weight_decay,
+        },
     )
+    if config.model == "POMO":
+        model_kwargs["num_starts"] = config.num_starts
+    if config.lr_scheduler == "multi_step":
+        from torch.optim.lr_scheduler import MultiStepLR
+
+        model_kwargs["lr_scheduler"] = MultiStepLR
+        model_kwargs["lr_scheduler_kwargs"] = {
+            "milestones": config.lr_milestones,
+            "gamma": config.lr_gamma,
+        }
+        model_kwargs["lr_scheduler_interval"] = "epoch"
+
+    return model_cls(env, **model_kwargs)
 
 
 def build_parser() -> ArgumentParser:
@@ -96,6 +114,49 @@ def build_parser() -> ArgumentParser:
         default=defaults.baseline,
         choices=("auto", "rollout", "shared", "exponential", "no"),
         help="auto: POMO->shared，其余->rollout",
+    )
+    parser.add_argument(
+        "--weight-decay",
+        type=float,
+        default=defaults.weight_decay,
+        help="Adam weight decay",
+    )
+    parser.add_argument(
+        "--lr-scheduler",
+        default=defaults.lr_scheduler,
+        choices=("none", "multi_step"),
+        help="学习率调度器；POMO 论文使用 multi_step",
+    )
+    parser.add_argument(
+        "--lr-milestones",
+        type=int,
+        nargs="+",
+        default=None,
+        help="MultiStepLR 的 milestone；不指定时使用配置默认值 [501]",
+    )
+    parser.add_argument(
+        "--lr-gamma",
+        type=float,
+        default=defaults.lr_gamma,
+        help="MultiStepLR 的 gamma",
+    )
+    parser.add_argument(
+        "--logit-clipping",
+        type=float,
+        default=defaults.logit_clipping,
+        help="AM/POMO decoder 的 tanh logit clipping",
+    )
+    parser.add_argument(
+        "--feedforward-hidden",
+        type=int,
+        default=defaults.feedforward_hidden,
+        help="AM/POMO feed-forward hidden dimension",
+    )
+    parser.add_argument(
+        "--num-starts",
+        type=int,
+        default=defaults.num_starts,
+        help="POMO 多起点数量；不指定时使用节点数，例如 TSP20 为 20",
     )
     parser.add_argument("--epochs", type=int, default=defaults.epochs)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)

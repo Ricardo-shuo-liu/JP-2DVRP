@@ -21,15 +21,32 @@ Usage (project root):
 The default decoding is greedy.  For AM-style sampling evaluation add
 ``--decode-type sampling --width 100`` (lower the batch size if GPU memory is
 tight).
+
+Classical baselines can be added to the same comparison:
+
+    python -m scripts.stage1.eval_stage1 \
+        --data-file data/tsp20/test.npz \
+        --model AttentionModel \
+        --checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+        --solvers ortools lkh \
+        --solver-time-limit 1.0 \
+        --output assets/results/stage1_tsp20_compare.json
+
+Use ``--skip-neural --solvers ortools lkh`` to evaluate only classical solvers.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
+import multiprocessing as mp
 import re
+import statistics
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,9 +62,15 @@ from rl4co.data.utils import load_npz_to_tensordict
 from scripts.stage1.run_stage1 import get_model
 from utils.config.stage1 import Config
 from utils.data import make_env
+from utils.solvers import (
+    find_lkh_executable,
+    solve_tsp_lkh,
+    solve_tsp_ortools,
+)
 
 
 SUPPORTED_MODELS = ("AttentionModel", "POMO", "MDAM", "PointerNetwork")
+SUPPORTED_SOLVERS = ("ortools", "lkh")
 PREFERRED_CKPT_NAMES = ("last.ckpt", "best.ckpt")
 
 
@@ -336,6 +359,10 @@ def evaluate_run(run: Run, td: TensorDict, args) -> dict:
     num_instances = td.batch_size[0]
     num_loc = int(td["locs"].shape[-2])
     device = args.device
+    print(
+        f"[{run.model}] 开始评估 {num_instances} 个实例，device={device}",
+        flush=True,
+    )
     model, env = build_model_for_eval(
         run.model,
         num_loc,
@@ -347,6 +374,9 @@ def evaluate_run(run: Run, td: TensorDict, args) -> dict:
 
     rewards = []
     started = time.perf_counter()
+    progress = ProgressReporter(
+        run.model, num_instances, args.progress_interval
+    )
     with torch.no_grad():
         for start in range(0, num_instances, args.batch_size):
             end = min(start + args.batch_size, num_instances)
@@ -361,11 +391,14 @@ def evaluate_run(run: Run, td: TensorDict, args) -> dict:
                 max_parallel=args.max_parallel,
             )
             rewards.append(reward.detach().cpu())
+            progress.update(end)
+    progress.update(num_instances, force=True)
 
     rewards = torch.cat(rewards)
     costs = -rewards  # TSPEnv reward = -tour length
     elapsed = time.perf_counter() - started
     return {
+        "kind": "neural",
         "model": run.model,
         "checkpoint": str(run.checkpoint),
         "num_samples": int(num_instances),
@@ -378,30 +411,282 @@ def evaluate_run(run: Run, td: TensorDict, args) -> dict:
         "max_cost": float(costs.max()),
         "seconds": elapsed,
         "instances_per_second": float(num_instances / elapsed),
+        "instance_costs": [float(cost) for cost in costs.tolist()],
     }
 
 
+_WORKER_LOCS = None
+
+
+def _init_solver_worker(locs):
+    """Initialize one ProcessPool worker with the shared instance array."""
+    global _WORKER_LOCS
+    _WORKER_LOCS = locs
+
+
+def _solver_kwargs(name: str, args) -> dict:
+    if name == "ortools":
+        return {
+            "time_limit": args.solver_time_limit,
+            "seed": args.seed,
+            "first_solution_strategy": args.ortools_first_solution,
+            "local_search_metaheuristic": args.ortools_local_search,
+        }
+    if name == "lkh":
+        return {
+            "lkh_path": args.lkh_path,
+            "time_limit": args.solver_time_limit,
+            "runs": args.lkh_runs,
+            "seed": args.seed,
+        }
+    raise ValueError(f"未知传统求解器: {name}")
+
+
+def _solve_one(index: int, locs, name: str, kwargs: dict) -> dict:
+    solver = solve_tsp_ortools if name == "ortools" else solve_tsp_lkh
+    started = time.perf_counter()
+    try:
+        result = solver(locs, **kwargs)
+    except Exception as exc:  # noqa: BLE001 - preserve solver failures in the report
+        return {
+            "index": int(index),
+            "cost": None,
+            "seconds": float(time.perf_counter() - started),
+            "status": "exception",
+            "error": str(exc),
+        }
+
+    cost = float(result.cost)
+    if not math.isfinite(cost):
+        cost = None
+    return {
+        "index": int(index),
+        "cost": cost,
+        "seconds": float(result.seconds),
+        "status": result.status,
+        "error": result.error,
+    }
+
+
+def _solve_worker(payload) -> dict:
+    index, name, kwargs = payload
+    return _solve_one(index, _WORKER_LOCS[index], name, kwargs)
+
+
+def _validate_solver(name: str, args) -> None:
+    """Fail before launching thousands of per-instance solver calls."""
+    if name == "ortools":
+        try:
+            from ortools.constraint_solver import (  # noqa: F401
+                pywrapcp,
+                routing_enums_pb2,
+            )
+        except ImportError as exc:
+            raise SystemExit(
+                "未安装 OR-Tools；请先执行：pip install ortools"
+            ) from exc
+        return
+
+    if name == "lkh":
+        try:
+            find_lkh_executable(args.lkh_path)
+        except FileNotFoundError as exc:
+            raise SystemExit(str(exc)) from exc
+        return
+
+    raise SystemExit(f"未知传统求解器: {name}")
+
+
+def _fmt_optional(value, precision: int = 6) -> str:
+    return "n/a" if value is None else f"{value:.{precision}f}"
+
+
+def _fmt_duration(seconds: float) -> str:
+    if seconds is None or not math.isfinite(seconds):
+        return "?"
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours:d}h{minutes:02d}m{secs:02d}s"
+    if minutes:
+        return f"{minutes:d}m{secs:02d}s"
+    return f"{secs:d}s"
+
+
+class ProgressReporter:
+    """Small time-based progress printer shared by neural/classical runs."""
+
+    def __init__(self, name: str, total: int, interval: float):
+        self.name = name
+        self.total = int(total)
+        self.interval = float(interval)
+        self.started = time.perf_counter()
+        self.last_print = self.started
+        self.last_done = 0
+
+    def update(self, done: int, force: bool = False) -> None:
+        if force and done == self.last_done and done > 0:
+            return
+        now = time.perf_counter()
+        if not force and (
+            self.interval <= 0 or now - self.last_print < self.interval
+        ):
+            return
+        elapsed = max(now - self.started, 1e-9)
+        rate = done / elapsed
+        eta = (self.total - done) / rate if rate > 0 else float("inf")
+        percent = 100.0 * done / self.total if self.total else 100.0
+        print(
+            f"[{self.name}] {done}/{self.total} ({percent:6.2f}%) "
+            f"elapsed={_fmt_duration(elapsed)} "
+            f"eta={_fmt_duration(eta)}",
+            flush=True,
+        )
+        self.last_print = now
+        self.last_done = done
+
+
+def evaluate_classical_solver(name: str, td: TensorDict, args) -> dict:
+    """Evaluate one classical TSP solver on the same fixed dataset."""
+    _validate_solver(name, args)
+    locs = td["locs"].detach().cpu().numpy()
+    num_instances, num_loc, _ = locs.shape
+    kwargs = _solver_kwargs(name, args)
+    label = "OR-Tools" if name == "ortools" else "LKH3"
+    print(
+        f"[{label}] 开始求解 {num_instances} 个实例，"
+        f"time_limit={args.solver_time_limit}s，"
+        f"num_procs={args.solver_num_procs}",
+        flush=True,
+    )
+    progress = ProgressReporter(label, num_instances, args.progress_interval)
+
+    started = time.perf_counter()
+    if args.solver_num_procs > 1:
+        with ProcessPoolExecutor(
+            max_workers=args.solver_num_procs,
+            mp_context=mp.get_context("spawn"),
+            initializer=_init_solver_worker,
+            initargs=(locs,),
+        ) as pool:
+            records = []
+            for record in pool.map(
+                _solve_worker,
+                [(index, name, kwargs) for index in range(num_instances)],
+            ):
+                records.append(record)
+                progress.update(len(records))
+    else:
+        records = []
+        for index in range(num_instances):
+            records.append(_solve_one(index, locs[index], name, kwargs))
+            progress.update(len(records))
+    progress.update(num_instances, force=True)
+    total_elapsed = time.perf_counter() - started
+
+    successful = [row for row in records if row["cost"] is not None]
+    costs = [row["cost"] for row in successful]
+    status_counts: dict[str, int] = {}
+    for row in records:
+        status_counts[row["status"]] = status_counts.get(row["status"], 0) + 1
+
+    mean_cost = statistics.fmean(costs) if costs else None
+    std_cost = statistics.stdev(costs) if len(costs) > 1 else 0.0 if costs else None
+    return {
+        "kind": "classical",
+        "model": label,
+        "solver": name,
+        "checkpoint": None,
+        "num_samples": int(num_instances),
+        "num_loc": int(num_loc),
+        "successes": len(successful),
+        "failures": int(num_instances - len(successful)),
+        "status_counts": status_counts,
+        "decode_type": "classical",
+        "width": None,
+        "mean_cost": float(mean_cost) if mean_cost is not None else None,
+        "std_cost": float(std_cost) if std_cost is not None else None,
+        "min_cost": float(min(costs)) if costs else None,
+        "max_cost": float(max(costs)) if costs else None,
+        "seconds": float(total_elapsed),
+        "mean_solve_seconds": (
+            float(statistics.fmean([row["seconds"] for row in successful]))
+            if successful
+            else None
+        ),
+        "instances_per_second": (
+            float(num_instances / total_elapsed) if total_elapsed > 0 else None
+        ),
+        "solver_time_limit": args.solver_time_limit,
+        "lkh_runs": args.lkh_runs if name == "lkh" else None,
+        "instance_results": records,
+    }
+
+
+def _finalize_results(results: list[dict]) -> None:
+    valid = [
+        row for row in results if row.get("mean_cost") is not None and row["mean_cost"] > 0
+    ]
+    if not valid:
+        return
+    best_cost = min(row["mean_cost"] for row in valid)
+    for row in results:
+        if row.get("mean_cost") is None:
+            row["gap_to_best_pct"] = None
+        else:
+            row["gap_to_best_pct"] = (
+                (row["mean_cost"] - best_cost) / best_cost * 100.0
+            )
+
+
 def print_results(results: list[dict]) -> None:
-    best_cost = min(row["mean_cost"] for row in results)
+    valid_costs = [
+        row["mean_cost"] for row in results if row.get("mean_cost") is not None
+    ]
+    best_cost = min(valid_costs) if valid_costs else None
     header = (
         f"{'model':<16}{'mean_cost':>12}{'gap_to_best':>14}"
-        f"{'std':>10}{'min':>10}{'max':>10}{'samples/s':>12}"
+        f"{'std':>10}{'min':>10}{'max':>10}{'samples/s':>12}{'status':>14}"
     )
     print(header)
     print("-" * len(header))
     for row in results:
-        gap = (row["mean_cost"] - best_cost) / best_cost * 100.0
+        mean_cost = row.get("mean_cost")
+        gap = (
+            (mean_cost - best_cost) / best_cost * 100.0
+            if mean_cost is not None and best_cost is not None
+            else float("nan")
+        )
+        status = (
+            "neural"
+            if row.get("kind") == "neural"
+            else (
+                f"{row.get('successes', 0)}ok/"
+                f"{row.get('failures', 0)}fail"
+            )
+        )
         print(
             f"{row['model']:<16}"
-            f"{row['mean_cost']:>12.6f}"
+            f"{_fmt_optional(mean_cost):>12}"
             f"{gap:>13.3f}%"
-            f"{row['std_cost']:>10.6f}"
-            f"{row['min_cost']:>10.6f}"
-            f"{row['max_cost']:>10.6f}"
-            f"{row['instances_per_second']:>11.1f}"
+            f"{_fmt_optional(row.get('std_cost')):>10}"
+            f"{_fmt_optional(row.get('min_cost')):>10}"
+            f"{_fmt_optional(row.get('max_cost')):>10}"
+            f"{(row.get('instances_per_second') or 0.0):>11.1f}"
+            f"{status:>14}"
         )
     print()
     for row in results:
+        if row.get("kind") == "classical":
+            print(
+                f"{row['model']}: time_limit={row['solver_time_limit']}s "
+                f"status={row['status_counts']} "
+                f"mean_cost={_fmt_optional(row.get('mean_cost'))} "
+                f"total={row['seconds']:.1f}s "
+                f"per_instance={_fmt_optional(row.get('mean_solve_seconds'), 6)}s"
+            )
+            continue
         print(
             f"{row['model']}: {row['checkpoint']}  "
             f"mean={row['mean_cost']:.6f}  "
@@ -430,6 +715,11 @@ def build_parser() -> argparse.ArgumentParser:
         choices=SUPPORTED_MODELS,
         default=list(SUPPORTED_MODELS),
         help="扫描 checkpoint-root 时评估哪些模型；默认全部",
+    )
+    parser.add_argument(
+        "--skip-neural",
+        action="store_true",
+        help="只评估传统求解器，不扫描神经模型 checkpoint",
     )
     parser.add_argument(
         "--checkpoint",
@@ -469,6 +759,52 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="对每个生成路线做完整性校验，失败即报错",
     )
+    parser.add_argument(
+        "--solvers",
+        nargs="+",
+        choices=SUPPORTED_SOLVERS,
+        default=[],
+        help="额外的传统求解器 baseline：ortools、lkh",
+    )
+    parser.add_argument(
+        "--solver-time-limit",
+        type=float,
+        default=0.1,
+        help="每个 TSP 实例的求解时间上限（秒）",
+    )
+    parser.add_argument(
+        "--solver-num-procs",
+        type=int,
+        default=1,
+        help="传统求解器并行进程数；1 表示顺序执行",
+    )
+    parser.add_argument(
+        "--progress-interval",
+        type=float,
+        default=10.0,
+        help="进度输出间隔（秒）；设为 0 可关闭周期性进度日志",
+    )
+    parser.add_argument(
+        "--lkh-path",
+        default=None,
+        help="LKH-3 可执行文件路径；不指定时从 PATH 查找 LKH/LKH-3/lkh",
+    )
+    parser.add_argument(
+        "--lkh-runs",
+        type=int,
+        default=1,
+        help="LKH 对每个实例运行的次数",
+    )
+    parser.add_argument(
+        "--ortools-first-solution",
+        default="PATH_CHEAPEST_ARC",
+        help="OR-Tools FirstSolutionStrategy",
+    )
+    parser.add_argument(
+        "--ortools-local-search",
+        default="GUIDED_LOCAL_SEARCH",
+        help="OR-Tools LocalSearchMetaheuristic",
+    )
     return parser
 
 
@@ -476,6 +812,16 @@ def main() -> None:
     args = build_parser().parse_args()
     if args.width < 1:
         raise SystemExit("--width 必须 >= 1")
+    if args.solver_time_limit < 0:
+        raise SystemExit("--solver-time-limit 必须 >= 0")
+    if args.solver_num_procs < 1:
+        raise SystemExit("--solver-num-procs 必须 >= 1")
+    if args.progress_interval < 0:
+        raise SystemExit("--progress-interval 必须 >= 0")
+    if args.lkh_runs < 1:
+        raise SystemExit("--lkh-runs 必须 >= 1")
+    if args.skip_neural and not args.solvers:
+        raise SystemExit("--skip-neural 时至少需要指定一个 --solvers")
     if args.decode_type == "greedy" and args.width != 1:
         print("提示：greedy 解码下 --width 无意义，已按 1 处理", file=sys.stderr)
         args.width = 1
@@ -489,19 +835,38 @@ def main() -> None:
 
     if args.device == "auto":
         args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(
+        f"[eval] 数据={data_file}，实例数={td.batch_size[0]}，"
+        f"节点数={td['locs'].shape[-2]}，device={args.device}",
+        flush=True,
+    )
 
-    runs = discover_runs(args)
+    runs = [] if args.skip_neural else discover_runs(args)
     results = [evaluate_run(run, td, args) for run in runs]
+    for solver_name in args.solvers:
+        results.append(evaluate_classical_solver(solver_name, td, args))
+    if not results:
+        raise SystemExit("没有可评估的模型或传统求解器")
+
+    _finalize_results(results)
     print_results(results)
 
     if args.output:
         out_path = Path(args.output).resolve()
         out_path.parent.mkdir(parents=True, exist_ok=True)
+        data_sha256 = hashlib.sha256(data_file.read_bytes()).hexdigest()
         out_path.write_text(
             json.dumps(
                 {
                     "data_file": str(data_file),
+                    "data_sha256": data_sha256,
+                    "num_samples": int(td.batch_size[0]),
+                    "num_loc": int(td["locs"].shape[-2]),
+                    "seed": args.seed,
                     "device": args.device,
+                    "solvers": args.solvers,
+                    "solver_time_limit": args.solver_time_limit,
+                    "lkh_runs": args.lkh_runs,
                     "results": results,
                 },
                 ensure_ascii=False,

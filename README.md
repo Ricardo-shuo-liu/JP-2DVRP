@@ -13,6 +13,7 @@
 utils/
   config/                 Stage1/Stage2 配置
   data.py                 环境构造、npz 规范读写、可行 CVRP 生成器
+  solvers/tsp.py          OR-Tools/LKH3 TSP baseline 适配与计时
 nets/
   blocks.py               Transformer 基础块
   rotary_pe.py            DPN 旋转位置编码
@@ -37,6 +38,17 @@ python -m scripts.stage1.run_stage1 \
 python -m scripts.stage1.run_stage1 \
     -e TSPEnv -m POMO \
     --num-loc 20 --epochs 10 --batch-size 64
+
+# POMO TSP20 论文配置（510 epochs，每 epoch 100k 实例）
+python -m scripts.stage1.run_stage1 \
+    -e TSPEnv -m POMO --num-loc 20 \
+    --epochs 510 --batch-size 64 --train-data-size 100000 \
+    --lr 1e-4 --weight-decay 1e-6 \
+    --num-encoder-layers 6 --num-heads 8 --normalization instance \
+    --baseline shared --lr-scheduler multi_step \
+    --lr-milestones 501 --lr-gamma 0.1 \
+    --logit-clipping 10 --feedforward-hidden 512 \
+    --precision 32 --accelerator gpu --devices 1
 ```
 
 可选模型：`AttentionModel`、`POMO`、`MDAM`、`PointerNetwork`。
@@ -102,6 +114,48 @@ python -m scripts.stage1.eval_stage1 \
 `--width` 是每个实例采样的候选路线数。显存有限时把 `--batch-size` 调小即可。
 输出会打印每个模型的 `mean_cost`、与最优模型的 gap、std/min/max 和吞吐，
 也可以用 `--output results.json` 保存结构化结果。
+
+### Stage1：神经模型与传统求解器对比
+
+同一个评估入口可以同时加入 OR-Tools 和 LKH3。传统求解器不需要 checkpoint，
+但必须先把数据固定到 `--data-file`，这样所有方法看到的是同一批实例：
+
+```bash
+# 同时评估已有 checkpoint，以及 OR-Tools / LKH3
+python -m scripts.stage1.eval_stage1 \
+    --data-file data/tsp20/test.npz \
+    --model AttentionModel \
+    --checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --solvers ortools lkh \
+    --solver-time-limit 1.0 \
+    --solver-num-procs 4 \
+    --lkh-path /path/to/LKH \
+    --output assets/results/stage1_tsp20_compare.json
+
+# 一次评估多个神经模型；按默认目录结构自动找每个模型最新 version
+python -m scripts.stage1.eval_stage1 \
+    --data-file data/tsp20/test.npz \
+    --checkpoint-root logs/stage1 \
+    --models AttentionModel POMO MDAM \
+    --solvers ortools lkh \
+    --solver-time-limit 1.0 \
+    --solver-num-procs 4 \
+    --output assets/results/stage1_tsp20_multi_compare.json
+
+# 只跑传统求解器
+python -m scripts.stage1.eval_stage1 \
+    --data-file data/tsp20/test.npz \
+    --skip-neural \
+    --solvers ortools lkh \
+    --solver-time-limit 1.0 \
+    --output assets/results/stage1_tsp20_classical.json
+```
+
+OR-Tools 需要安装 `pip install ortools`；LKH3 不需要 Python 包装器，
+脚本会自动查找 `assets/solver/LKH-*/LKH`，也可以用 `--lkh-path` 显式指定。
+`--solver-time-limit` 是每个实例的限制，不是整批时间。输出 JSON 会记录数据集
+SHA256、每个实例的解、状态、耗时，以及成功/失败统计，便于复查。
+默认每 10 秒输出一次进度和 ETA，可用 `--progress-interval 0` 关闭。
 
 ## Stage2：生成 CVRP 数据
 
