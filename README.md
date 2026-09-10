@@ -49,6 +49,17 @@ python -m scripts.stage1.run_stage1 \
     --lr-milestones 501 --lr-gamma 0.1 \
     --logit-clipping 10 --feedforward-hidden 512 \
     --precision 32 --accelerator gpu --devices 1
+
+# MDAM TSP20 论文配置（100 epochs，每 epoch 1.28M 实例）
+python -m scripts.stage1.run_stage1 \
+    -e TSPEnv -m MDAM --num-loc 20 \
+    --epochs 100 --batch-size 512 --train-data-size 1280000 \
+    --val-data-size 10000 --lr 1e-4 --gradient-clip-val 1.0 \
+    --num-encoder-layers 3 --num-heads 8 --normalization batch \
+    --baseline rollout --mdam-num-paths 5 \
+    --mdam-eg-step-gap 2 --mdam-kl-loss 0.01 \
+    --logit-clipping 10 --precision 32 \
+    --accelerator gpu --devices 1
 ```
 
 可选模型：`AttentionModel`、`POMO`、`MDAM`、`PointerNetwork`。
@@ -156,6 +167,8 @@ OR-Tools 需要安装 `pip install ortools`；LKH3 不需要 Python 包装器，
 `--solver-time-limit` 是每个实例的限制，不是整批时间。输出 JSON 会记录数据集
 SHA256、每个实例的解、状态、耗时，以及成功/失败统计，便于复查。
 默认每 10 秒输出一次进度和 ETA，可用 `--progress-interval 0` 关闭。
+结果会在每个模型/求解器完成后增量写入一次，未全部完成时 JSON 中的
+`partial=true`；全部完成后写为 `partial=false`。
 
 ## Stage2：生成 CVRP 数据
 

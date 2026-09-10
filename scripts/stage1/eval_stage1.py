@@ -808,6 +808,41 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _write_results(
+    output: str | None,
+    data_file: Path,
+    td: TensorDict,
+    args,
+    results: list[dict],
+    *,
+    partial: bool,
+    data_sha256: str,
+) -> None:
+    if not output:
+        return
+    out_path = Path(output).resolve()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(
+            {
+                "partial": partial,
+                "data_file": str(data_file),
+                "data_sha256": data_sha256,
+                "num_samples": int(td.batch_size[0]),
+                "num_loc": int(td["locs"].shape[-2]),
+                "seed": args.seed,
+                "device": args.device,
+                "solvers": args.solvers,
+                "solver_time_limit": args.solver_time_limit,
+                "lkh_runs": args.lkh_runs,
+                "results": results,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+    )
+
+
 def main() -> None:
     args = build_parser().parse_args()
     if args.width < 1:
@@ -842,9 +877,34 @@ def main() -> None:
     )
 
     runs = [] if args.skip_neural else discover_runs(args)
-    results = [evaluate_run(run, td, args) for run in runs]
+    data_sha256 = hashlib.sha256(data_file.read_bytes()).hexdigest()
+    results = []
+
+    for run in runs:
+        results.append(evaluate_run(run, td, args))
+        _finalize_results(results)
+        _write_results(
+            args.output,
+            data_file,
+            td,
+            args,
+            results,
+            partial=True,
+            data_sha256=data_sha256,
+        )
+
     for solver_name in args.solvers:
         results.append(evaluate_classical_solver(solver_name, td, args))
+        _finalize_results(results)
+        _write_results(
+            args.output,
+            data_file,
+            td,
+            args,
+            results,
+            partial=True,
+            data_sha256=data_sha256,
+        )
     if not results:
         raise SystemExit("没有可评估的模型或传统求解器")
 
@@ -852,27 +912,16 @@ def main() -> None:
     print_results(results)
 
     if args.output:
-        out_path = Path(args.output).resolve()
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        data_sha256 = hashlib.sha256(data_file.read_bytes()).hexdigest()
-        out_path.write_text(
-            json.dumps(
-                {
-                    "data_file": str(data_file),
-                    "data_sha256": data_sha256,
-                    "num_samples": int(td.batch_size[0]),
-                    "num_loc": int(td["locs"].shape[-2]),
-                    "seed": args.seed,
-                    "device": args.device,
-                    "solvers": args.solvers,
-                    "solver_time_limit": args.solver_time_limit,
-                    "lkh_runs": args.lkh_runs,
-                    "results": results,
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
+        _write_results(
+            args.output,
+            data_file,
+            td,
+            args,
+            results,
+            partial=False,
+            data_sha256=data_sha256,
         )
+        out_path = Path(args.output).resolve()
         print(f"结果已保存: {out_path}")
 
 

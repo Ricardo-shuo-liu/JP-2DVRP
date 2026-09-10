@@ -53,7 +53,15 @@ def get_model(env, config: Config):
         if config.model in ("AttentionModel", "POMO"):
             policy_kwargs["tanh_clipping"] = config.logit_clipping
             policy_kwargs["feedforward_hidden"] = config.feedforward_hidden
+        if config.model == "MDAM":
+            policy_kwargs["num_paths"] = config.mdam_num_paths
+            policy_kwargs["eg_step_gap"] = config.mdam_eg_step_gap
+            policy_kwargs["tanh_clipping"] = config.logit_clipping
 
+    if config.model == "MDAM" and config.mdam_kl_loss != 0.0:
+        from scripts.stage1.mdam_kl import MDAMWithKL
+
+        model_cls = MDAMWithKL
     model_kwargs = dict(
         policy_kwargs=policy_kwargs,
         baseline=baseline,
@@ -67,8 +75,17 @@ def get_model(env, config: Config):
             "weight_decay": config.weight_decay,
         },
     )
+    if config.model == "MDAM":
+        from scripts.stage1.mdam_fixed import FixedMDAMPolicy
+
+        model_kwargs["policy"] = FixedMDAMPolicy(
+            env_name=env.name, **policy_kwargs
+        )
+        model_kwargs.pop("policy_kwargs", None)
     if config.model == "POMO":
         model_kwargs["num_starts"] = config.num_starts
+    if config.model == "MDAM" and config.mdam_kl_loss != 0.0:
+        model_kwargs["kl_loss"] = config.mdam_kl_loss
     if config.lr_scheduler == "multi_step":
         from torch.optim.lr_scheduler import MultiStepLR
 
@@ -122,6 +139,12 @@ def build_parser() -> ArgumentParser:
         help="Adam weight decay",
     )
     parser.add_argument(
+        "--gradient-clip-val",
+        type=float,
+        default=defaults.gradient_clip_val,
+        help="gradient clipping value；MDAM 论文使用 1.0，0 表示不裁剪",
+    )
+    parser.add_argument(
         "--lr-scheduler",
         default=defaults.lr_scheduler,
         choices=("none", "multi_step"),
@@ -157,6 +180,24 @@ def build_parser() -> ArgumentParser:
         type=int,
         default=defaults.num_starts,
         help="POMO 多起点数量；不指定时使用节点数，例如 TSP20 为 20",
+    )
+    parser.add_argument(
+        "--mdam-num-paths",
+        type=int,
+        default=defaults.mdam_num_paths,
+        help="MDAM decoder 路径数，论文默认 5",
+    )
+    parser.add_argument(
+        "--mdam-eg-step-gap",
+        type=int,
+        default=defaults.mdam_eg_step_gap,
+        help="MDAM embedding-glimpse 间隔 n_EG，论文 TSP 配置为 2",
+    )
+    parser.add_argument(
+        "--mdam-kl-loss",
+        type=float,
+        default=defaults.mdam_kl_loss,
+        help="MDAM 路径多样性 KL 项系数，论文 TSP 配置为 0.01",
     )
     parser.add_argument("--epochs", type=int, default=defaults.epochs)
     parser.add_argument("--batch-size", type=int, default=defaults.batch_size)
@@ -297,6 +338,7 @@ def main():
         accelerator=config.accelerator,
         devices=config.devices,
         precision=config.precision,
+        gradient_clip_val=config.gradient_clip_val or None,
         logger=logger,
         callbacks=callbacks,
         default_root_dir=config.log_dir,
