@@ -1,0 +1,38 @@
+augment_fn: dihedral8
+baseline: shared
+baseline_kwargs: {}
+batch_size: 64
+data_dir: data/
+dataloader_num_workers: 0
+feats: null
+first_aug_identity: true
+generate_default_data: false
+log_on_step: true
+lr_scheduler: !!python/name:torch.optim.lr_scheduler.MultiStepLR ''
+lr_scheduler_interval: epoch
+lr_scheduler_kwargs:
+  gamma: 0.1
+  milestones:
+  - 501
+lr_scheduler_monitor: val/reward
+metrics: {}
+num_augment: 8
+num_starts: 20
+optimizer: Adam
+optimizer_kwargs:
+  lr: 0.0001
+  weight_decay: 1.0e-06
+policy_kwargs:
+  embed_dim: 128
+  feedforward_hidden: 512
+  normalization: instance
+  num_encoder_layers: 6
+  num_heads: 8
+  tanh_clipping: 10.0
+reward_scale: null
+shuffle_train_dataloader: false
+test_batch_size: null
+test_data_size: 10000
+train_data_size: 100000
+val_batch_size: null
+val_data_size: 10000
