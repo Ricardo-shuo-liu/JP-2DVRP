@@ -324,9 +324,12 @@ def _decode_chunk(
                 num_starts=num_starts,
             )
             reward = out["reward"]
+            # POMO returns rewards in start-major order:
+            # [num_starts, expanded_batch], not [batch, width, num_starts].
             reward = reward.reshape(
-                num_instances, current_width, num_starts
-            ).amax(dim=(1, 2))
+                num_starts, num_instances, current_width
+            ).amax(dim=0)
+            reward = reward.amax(dim=1)
 
         elif model_name == "MDAM":
             out = model.policy(

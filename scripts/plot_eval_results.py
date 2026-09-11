@@ -257,7 +257,9 @@ def main():
     best = min(valid_means) if valid_means else None
     for run in runs:
         gap = run["gap"]
-        if gap is None and run["mean_cost"] is not None and best:
+        # Always recompute gap globally.  Otherwise each JSON has its own
+        # best method and multiple curves incorrectly show gap == 0.
+        if run["mean_cost"] is not None and best:
             gap = (run["mean_cost"] - best) / best * 100.0
         run["gap"] = gap
     _bar_panel(
