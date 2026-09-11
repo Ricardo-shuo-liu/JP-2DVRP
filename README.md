@@ -170,6 +170,26 @@ SHA256、每个实例的解、状态、耗时，以及成功/失败统计，便�
 结果会在每个模型/求解器完成后增量写入一次，未全部完成时 JSON 中的
 `partial=true`；全部完成后写为 `partial=false`。
 
+评估 JSON 可以直接绘制成对比图：
+
+```bash
+python scripts/plot_eval_results.py \
+    assets/results/stage1_tsp20_compare.json \
+    -o assets/images/stage1_tsp20_eval.png
+```
+
+加 `--distributions` 还会输出逐实例路径长度分布：
+
+```bash
+python scripts/plot_eval_results.py \
+    assets/results/stage1_tsp20_compare.json \
+    --distributions \
+    -o assets/images/stage1_tsp20_eval.png
+```
+
+分布图默认在每个箱体上方标注 `mean/p95`，下方标注 `p5/p50`；
+可用 `--no-distribution-labels` 关闭标注。
+
 ## Stage2：生成 CVRP 数据
 
 Stage2 数据来自 RL4CO `CVRPEnv`。生成器会保证每个样本
