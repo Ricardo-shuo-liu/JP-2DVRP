@@ -92,20 +92,34 @@ class RouteEvaluator:
         for param in self.policy.parameters():
             param.requires_grad_(False)
 
-    def _route_reward(self, cluster_td: TensorDict) -> torch.Tensor:
-        """Return best reward for a single cluster subproblem."""
+    def _route_rewards_chunk(self, cluster_td: TensorDict) -> torch.Tensor:
+        """Return one reward per padded cluster for one TSP batch."""
+        num_clusters = cluster_td.batch_size[0]
         name = self.config.route_model
-        if name in ("AttentionModel", "POMO", "PointerNetwork"):
+        if name == "POMO":
+            num_starts = int(self.config.route_num_starts)
+            if num_starts <= 0:
+                num_starts = self.route_env.get_num_starts(cluster_td)
+            self.policy.test_decode_type = "multistart_greedy"
+            out = self.policy(
+                cluster_td,
+                self.route_env,
+                phase="test",
+                num_starts=num_starts,
+            )
+            reward = out["reward"]
+            # POMO returns start-major rewards: [num_starts, num_clusters].
+            return reward.reshape(num_starts, num_clusters).amax(dim=0)
+
+        if name in ("AttentionModel", "PointerNetwork"):
             out = self.policy(
                 cluster_td,
                 self.route_env,
                 phase="test",
                 decode_type="greedy",
             )
-            reward = out["reward"]
-            if reward.dim() > 1:
-                reward = reward.max(-1).values
-            return reward
+            return out["reward"].reshape(num_clusters)
+
         if name == "MDAM":
             out = self.policy(
                 cluster_td,
@@ -113,15 +127,66 @@ class RouteEvaluator:
                 phase="test",
                 decode_type="greedy",
             )
-            reward = out["reward"]  # [B, num_paths]
-            return reward.max(-1).values
+            return out["reward"].max(-1).values
         raise NotImplementedError(name)
+
+    def _route_rewards(self, cluster_td: TensorDict) -> torch.Tensor:
+        """Optionally split the cluster batch to control TSP evaluation memory."""
+        total = cluster_td.batch_size[0]
+        chunk = int(self.config.route_eval_batch_size)
+        if chunk <= 0 or chunk >= total:
+            return self._route_rewards_chunk(cluster_td)
+        rewards = []
+        for start in range(0, total, chunk):
+            sub_td = cluster_td[start : start + chunk]
+            rewards.append(self._route_rewards_chunk(sub_td))
+        return torch.cat(rewards, dim=0)
+
+    def _cluster_costs(
+        self, td: TensorDict, assignments: torch.Tensor
+    ) -> torch.Tensor:
+        """Evaluate all clusters in one padded batch."""
+        batch_size, num_nodes = assignments.shape
+        num_vehicles = self.config.num_vehicles
+        device = td.device
+
+        depot = td["locs"][:, :1, :]
+        customer_locs = td["locs"][:, 1:, :]
+        member_indices = []
+        max_members = 0
+        for b in range(batch_size):
+            row = []
+            for m in range(num_vehicles):
+                idx = (assignments[b] == m).nonzero(as_tuple=False).squeeze(-1)
+                row.append(idx)
+                max_members = max(max_members, int(idx.numel()))
+            member_indices.append(row)
+
+        max_members = max(max_members, int(self.config.route_pad_to))
+        cluster_len = max(2, max_members + 1)
+        padded = depot[:, None, :].expand(
+            batch_size, num_vehicles, cluster_len, 2
+        ).clone()
+        for b in range(batch_size):
+            for m in range(num_vehicles):
+                members = member_indices[b][m]
+                if members.numel() > 0:
+                    padded[b, m, 1 : 1 + members.numel()] = customer_locs[b, members]
+
+        cluster_td = TensorDict(
+            {"locs": padded.reshape(batch_size * num_vehicles, cluster_len, 2)},
+            batch_size=[batch_size * num_vehicles],
+            device=device,
+        )
+        cluster_td = self.route_env.reset(cluster_td)
+        rewards = self._route_rewards(cluster_td)
+        return -rewards.reshape(batch_size, num_vehicles)
 
     @torch.no_grad()
     def evaluate(
         self, td: TensorDict, assignments: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Evaluate all clusters and return (total cost, capacity overflow)."""
+        """Return per-vehicle costs and per-vehicle capacity overflow."""
         device = td.device
         if next(self.policy.parameters()).device != device:
             self.policy = self.policy.to(device)
@@ -133,8 +198,6 @@ class RouteEvaluator:
         if assignments.max() >= num_vehicles or assignments.min() < 0:
             raise ValueError("assignment 超出车辆编号范围")
 
-        depot = td["locs"][:, :1, :]
-        customer_locs = td["locs"][:, 1:, :]
         demand = td["demand"]
         if demand.dim() == 3:
             demand = demand.squeeze(-1)
@@ -150,22 +213,6 @@ class RouteEvaluator:
             batch_size, num_vehicles, device=device, dtype=demand.dtype
         )
         cluster_demand.scatter_add_(1, assignments, demand)
-        overflow = torch.clamp(cluster_demand - capacity, min=0).sum(-1)
-
-        costs = torch.zeros(batch_size, device=device)
-        for b in range(batch_size):
-            cost_b = 0.0
-            for m in range(num_vehicles):
-                member_idx = (assignments[b] == m).nonzero(as_tuple=False).squeeze(-1)
-                if member_idx.numel() == 0:
-                    continue
-                member_locs = customer_locs[b][member_idx]
-                cluster_locs = torch.cat((depot[b], member_locs), dim=0)
-                cluster_td = TensorDict(
-                    {"locs": cluster_locs.unsqueeze(0)}, batch_size=[1], device=device
-                )
-                cluster_td = self.route_env.reset(cluster_td)
-                reward = self._route_reward(cluster_td)
-                cost_b = cost_b - reward.item()
-            costs[b] = cost_b
+        overflow = torch.clamp(cluster_demand - capacity, min=0)
+        costs = self._cluster_costs(td, assignments)
         return costs, overflow

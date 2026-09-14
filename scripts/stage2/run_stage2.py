@@ -40,7 +40,9 @@ def build_policy(config: Config):
         partition_network=partition_network,
         route_evaluator=route_evaluator,
         num_vehicles=config.num_vehicles,
+        objective=config.objective,
         penalty=config.penalty,
+        capacity_mask_mode=config.capacity_mask_mode,
     )
 
 
@@ -86,11 +88,23 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--num-loc", type=int, default=defaults.num_loc)
     parser.add_argument("--capacity", type=float, default=defaults.capacity)
     parser.add_argument("--num-vehicles", type=int, default=defaults.num_vehicles)
+    parser.add_argument(
+        "--objective",
+        default=defaults.objective,
+        choices=("sum", "minmax"),
+        help="sum: minimize total route length; minmax: minimize the longest route",
+    )
     parser.add_argument("--penalty", type=float, default=defaults.penalty)
+    parser.add_argument(
+        "--capacity-mask-mode",
+        default=defaults.capacity_mask_mode,
+        choices=("none", "static"),
+        help="capacity mask on the [vehicle, node] assignment matrix",
+    )
     parser.add_argument(
         "--baseline",
         default=defaults.baseline,
-        choices=("exponential", "shared", "no"),
+        choices=("rollout", "exponential", "shared", "no"),
     )
 
     parser.add_argument("--embed-dim", type=int, default=defaults.embed_dim)
@@ -99,6 +113,24 @@ def build_parser() -> ArgumentParser:
     )
     parser.add_argument("--num-heads", type=int, default=defaults.num_heads)
     parser.add_argument("--temperature", type=float, default=defaults.temperature)
+    parser.add_argument(
+        "--route-pad-to",
+        type=int,
+        default=defaults.route_pad_to,
+        help="minimum number of customer slots per padded cluster; 0 uses batch max",
+    )
+    parser.add_argument(
+        "--route-num-starts",
+        type=int,
+        default=defaults.route_num_starts,
+        help="POMO starts for the route evaluator; 0 uses the padded cluster length",
+    )
+    parser.add_argument(
+        "--route-eval-batch-size",
+        type=int,
+        default=defaults.route_eval_batch_size,
+        help="maximum clusters per TSP forward; 0 evaluates all clusters at once",
+    )
 
     parser.add_argument(
         "--route-model",
@@ -194,7 +226,7 @@ def main():
 
     model = build_model(config)
     print(f"开始 Stage2：{config.env}, num_loc={config.num_loc}, "
-          f"num_vehicles={config.num_vehicles}")
+          f"num_vehicles={config.num_vehicles}, objective={config.objective}")
     print(f"route model: {config.route_model}, route ckpt: {config.route_checkpoint}")
     print(config.to_dict())
 

@@ -15,8 +15,10 @@ class Config(BaseConfig):
     num_loc: int = 50
     capacity: Optional[float] = None  # None 表示使用 RL4CO 按节点数的默认容量
     num_vehicles: int = 8
+    objective: str = "minmax"  # sum / minmax
     penalty: float = 10.0
-    baseline: str = "exponential"
+    capacity_mask_mode: str = "static"  # none / static
+    baseline: str = "rollout"
 
     # 分簇网络结构（2D-Ptr + DPN PE）
     embed_dim: int = 128
@@ -31,6 +33,9 @@ class Config(BaseConfig):
     route_num_encoder_layers: int = 3
     route_num_heads: int = 8
     route_normalization: str = "batch"
+    route_pad_to: int = 0  # 0: pad to the largest cluster in the batch
+    route_num_starts: int = 0  # 0: use the padded TSP length for POMO
+    route_eval_batch_size: int = 0  # 0: evaluate all clusters in one TSP batch
 
     # Stage2 默认按小规模可跑通配置；大规模训练请自行调大
     batch_size: int = 32

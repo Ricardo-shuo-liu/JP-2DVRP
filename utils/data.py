@@ -23,7 +23,12 @@ from rl4co.envs.routing.cvrp.generator import CVRPGenerator
 class FeasibleCVRPGenerator(CVRPGenerator):
     """CVRP generator rejecting instances that cannot fit ``num_vehicles``."""
 
-    def __init__(self, num_vehicles: int, max_attempts: int = 10_000, **kwargs):
+    def __init__(
+        self,
+        num_vehicles: int,
+        max_attempts: int = 10_000,
+        **kwargs,
+    ):
         super().__init__(**kwargs)
         self.num_vehicles = num_vehicles
         self.max_attempts = max_attempts

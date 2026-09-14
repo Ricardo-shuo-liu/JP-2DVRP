@@ -222,6 +222,10 @@ python -m scripts.stage2.generate_data \
     --out-dir data/cvrp50 --seed 4321
 ```
 
+Total-demand feasibility is treated as an environment/data check, not as a
+model objective. The generator rejects samples with
+`sum(demand) > num_vehicles * capacity`.
+
 Generated fields:
 
 - `locs`: customer coordinates `[N, num_loc, 2]`
@@ -262,13 +266,43 @@ python -m scripts.stage2.run_stage2 \
 
 Each Stage 2 experiment fixes the vehicle count through `--num-vehicles`.
 `--penalty` controls the capacity-overflow penalty, and `--baseline` accepts
-`exponential` (default), `shared`, or `no`.
+`rollout` (paper-style default), `exponential`, `shared`, or `no`.
 
-The partition network outputs `[batch, num_vehicles, num_nodes]` logits,
-applies a node-wise softmax over vehicles, and samples or greedily selects one
-vehicle per customer. Every cluster is then solved by the frozen Stage 1 TSP
-model. Training updates the partition network only; Stage 1 routing parameters
-remain frozen.
+The Stage 2 objective can be either total route length or the maximum route
+length:
+
+```bash
+# Min-max objective with capacity-aware assignment
+python -m scripts.stage2.run_stage2 \
+    --num-loc 50 --num-vehicles 8 --capacity 40 \
+    --objective minmax \
+    --capacity-mask-mode static \
+    --penalty 10.0 \
+    --route-model AttentionModel \
+    --route-checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --route-pad-to 20
+```
+
+- `--objective minmax` uses `max_k TSP(cluster_k)`; `sum` uses the
+  conventional total CVRP length.
+- `--capacity-mask-mode static` disables `(vehicle, node)` entries whose
+  vehicle capacity is smaller than that node's demand. It keeps node
+  assignments independent; cumulative cluster overflow is handled by the
+  post-assignment penalty.
+- `--penalty` penalizes per-vehicle capacity overflow.
+- `--route-pad-to` pads every cluster to at least this many customer slots
+  before calling the Stage 1 TSP evaluator; `0` uses the largest cluster in
+  the batch.
+- `--route-eval-batch-size` limits how many clusters are sent to the TSP model
+  in one forward pass; `0` uses all clusters. Stage 2 batch size and TSP
+  evaluation batch size are therefore independent.
+
+The partition network outputs `[batch, num_vehicles, num_nodes]` logits and
+selects one vehicle per customer. With `--capacity-mask-mode none` or `static`
+the assignments are independent over nodes; cumulative overflow is handled by
+the post-assignment penalty.
+Every cluster is then solved by the frozen Stage 1 TSP model. Training updates
+the partition network only; Stage 1 routing parameters remain frozen.
 
 ## Help and common errors
 

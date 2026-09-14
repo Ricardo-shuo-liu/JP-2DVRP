@@ -211,6 +211,9 @@ python -m scripts.stage2.generate_data \
     --out-dir data/cvrp50 --seed 4321
 ```
 
+总需求可行性属于环境/数据检查，而不是模型目标。生成器会过滤
+`sum(demand) > num_vehicles * capacity` 的样本。
+
 生成文件的字段为：
 
 - `locs`：客户坐标 `[N, num_loc, 2]`
@@ -249,10 +252,34 @@ python -m scripts.stage2.run_stage2 \
 ```
 
 Stage2 每次实验通过 `--num-vehicles` 固定车辆数；`--penalty` 控制容量惩罚系数；
-`--baseline` 可选 `exponential`（默认）、`shared`、`no`。
+`--baseline` 可选 `rollout`（论文式默认）、`exponential`、`shared`、`no`。
 
-Stage2 分簇网络输出 `[batch, num_vehicles, num_nodes]` logits，对每个 node 维做
-独立 softmax 后采样/贪心得到簇分配；每个簇再交给冻结的 Stage1 TSP 模型求解。
+Stage2 支持总路程目标和 min-max 目标：
+
+```bash
+# min-max：最小化最长簇路径，并启用容量感知分配
+python -m scripts.stage2.run_stage2 \
+    --num-loc 50 --num-vehicles 8 --capacity 40 \
+    --objective minmax \
+    --capacity-mask-mode static \
+    --penalty 10.0 \
+    --route-model AttentionModel \
+    --route-checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --route-pad-to 20
+```
+
+- `--objective minmax` 使用 `max_k TSP(cluster_k)`；`sum` 使用传统总路程目标。
+- `--capacity-mask-mode static` 将“车辆容量小于该节点需求”的 `(vehicle, node)`
+  位置直接掩码；各节点分配仍相互独立，累计容量溢出由分配后的惩罚处理。
+- `--penalty` 惩罚单车容量溢出。
+- `--route-pad-to` 将每个簇至少 padding 到指定客户数后再送入 Stage1 TSP
+  评价器；`0` 表示使用当前 batch 中最大簇长度。
+- `--route-eval-batch-size` 控制一次送入 TSP 模型的最大簇数量；`0` 表示一次
+  处理全部簇。Stage2 batch 大小和 TSP 评价 batch 大小因此相互独立。
+
+Stage2 分簇网络输出 `[batch, num_vehicles, num_nodes]` logits，为每个客户选择车辆。
+当 `--capacity-mask-mode` 为 `none` 或 `static` 时，各节点分配相互独立；
+累计容量溢出由分配后的惩罚处理。每个簇再交给冻结的 Stage1 TSP 模型求解。
 训练损失只更新分簇网络，不更新 Stage1 路由参数。
 
 ## 查看参数与常见错误

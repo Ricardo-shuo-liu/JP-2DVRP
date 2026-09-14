@@ -13,4 +13,6 @@ logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/epoch_094.ckpt
 logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt
 
 logs/stage1/TSPEnv-POMO/version_0/checkpoints/epoch_509.ckpt
-logs/stage1/TSPEnv-POMO/version_0/checkpoints/last.ckpt
+logs/stage1/TSPEnv-POMO/version_0/checkpoints/last.ck
+
+1651_generalize_learned_heuristics_.pdf
