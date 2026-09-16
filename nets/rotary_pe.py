@@ -21,6 +21,12 @@ class DepotAwareRotaryPE(nn.Module):
         assert embed_dim % 2 == 0, "rotary PE requires even embed_dim"
         self.embed_dim = embed_dim
         self.depot_proj = nn.Linear(2, embed_dim, bias=True)
+        # DPN Appendix C.6 applies a final trainable projection W_PE after
+        # the pairwise rotation.  Identity initialization keeps the initial
+        # behavior identical to the previous implementation.
+        self.pe_proj = nn.Linear(embed_dim, embed_dim, bias=False)
+        with torch.no_grad():
+            self.pe_proj.weight.copy_(torch.eye(embed_dim))
 
     def forward(self, depot: torch.Tensor, num_vehicles: int) -> torch.Tensor:
         # depot: [B, 1, 2] or [B, 2]
@@ -48,4 +54,4 @@ class DepotAwareRotaryPE(nn.Module):
         real = zr * cos_a[None] - zi * sin_a[None]
         imag = zr * sin_a[None] + zi * cos_a[None]
         out = torch.stack((real, imag), dim=-1).view(batch_size, num_vehicles, d)
-        return out
+        return self.pe_proj(out)

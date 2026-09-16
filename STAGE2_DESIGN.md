@@ -182,6 +182,15 @@ PE(m, q) = Re[
 
 `m` 是车辆编号。这样相同状态的车辆也会得到不同的表示。
 
+当前实现还按 DPN Appendix C.6 加入最后的可学习投影：
+
+```text
+PE = rotate(depot_proj(depot), vehicle_index) @ W_PE
+```
+
+`W_PE` 初始化为单位矩阵，因此初始行为与旧实现一致，训练过程中再学习
+适合当前任务的投影。
+
 之后车辆表示依次经过：
 
 ```text
@@ -704,9 +713,12 @@ log p(z | data)
 
 ```bash
 --baseline exponential
---baseline shared
 --baseline no
 ```
+
+`shared` baseline 不适用于当前 Stage2 reward。Stage2 的 reward 形状是
+`[B]`，而 RL4CO 的 `SharedBaseline` 期望在 `dim=1` 上求均值；直接使用会报
+`IndexError: Dimension out of range`。
 
 ### 9.4 损失
 
@@ -923,7 +935,7 @@ POMO 和 MDAM 的接口保留，但还需要针对以下问题单独验证：
 + depot padding
 + 批量冻结 AM 评价
 + min-max / sum 可切换目标
-+ rollout / exponential / shared baseline
++ rollout / exponential / no baseline
 + REINFORCE 训练
 ```
 

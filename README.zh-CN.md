@@ -252,7 +252,7 @@ python -m scripts.stage2.run_stage2 \
 ```
 
 Stage2 每次实验通过 `--num-vehicles` 固定车辆数；`--penalty` 控制容量惩罚系数；
-`--baseline` 可选 `rollout`（论文式默认）、`exponential`、`shared`、`no`。
+`--baseline` 可选 `rollout`（论文式默认）、`exponential`、`no`。
 
 Stage2 支持总路程目标和 min-max 目标：
 

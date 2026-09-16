@@ -71,7 +71,8 @@ class PartitionNetwork(nn.Module):
         )
         self.logit_scale = embed_dim ** 0.5
 
-    def forward(self, td: TensorDict, num_vehicles: int) -> torch.Tensor:
+    def forward(self, td: TensorDict,
+                 num_vehicles: int) -> torch.Tensor:
         locs = td["locs"]
         if locs.dim() != 3 or locs.size(-1) != 2:
             raise ValueError(f"locs 应为 [B, N, 2]，当前 {tuple(locs.shape)}")

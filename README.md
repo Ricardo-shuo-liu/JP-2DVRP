@@ -266,7 +266,7 @@ python -m scripts.stage2.run_stage2 \
 
 Each Stage 2 experiment fixes the vehicle count through `--num-vehicles`.
 `--penalty` controls the capacity-overflow penalty, and `--baseline` accepts
-`rollout` (paper-style default), `exponential`, `shared`, or `no`.
+`rollout` (paper-style default), `exponential`, or `no`.
 
 The Stage 2 objective can be either total route length or the maximum route
 length:

@@ -49,6 +49,11 @@ def build_policy(config: Config):
 def build_model(config: Config):
     from rl4co.models import REINFORCE
 
+    if config.baseline == "shared":
+        raise ValueError(
+            "Stage2 policy 的 reward 形状是 [B]，RL4CO SharedBaseline "
+            "需要额外的 reward 维度；请使用 rollout、exponential 或 no。"
+        )
     generator_params = dict(config.generator_params)
     if config.capacity is not None:
         generator_params["capacity"] = config.capacity
@@ -104,7 +109,8 @@ def build_parser() -> ArgumentParser:
     parser.add_argument(
         "--baseline",
         default=defaults.baseline,
-        choices=("rollout", "exponential", "shared", "no"),
+        choices=("rollout", "exponential", "no"),
+        help="Stage2 policy reward is [B]; shared baseline is not supported",
     )
 
     parser.add_argument("--embed-dim", type=int, default=defaults.embed_dim)
