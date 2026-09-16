@@ -254,6 +254,10 @@ python -m scripts.stage2.run_stage2 \
 Stage2 每次实验通过 `--num-vehicles` 固定车辆数；`--penalty` 控制容量惩罚系数；
 `--baseline` 可选 `rollout`（论文式默认）、`exponential`、`no`。
 
+`num_vehicles` 是运行时维度，不是网络参数。分簇网络中没有任何参数依赖 M，
+因此同一组权重可以通过运行时传入不同的 `num_vehicles` 复用到不同车辆数场景。
+当前训练数据生成器每次运行仍使用固定的 M。
+
 Stage2 支持总路程目标和 min-max 目标：
 
 ```bash

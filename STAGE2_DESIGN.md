@@ -231,7 +231,7 @@ N = number of customers
 | `locs` | `[B, N+1, 2]` | float32 | index 0 是 depot，其余是客户坐标 |
 | `demand` | `[B, N]` | float32 | 归一化需求 |
 | `vehicle_capacity` | `[B, 1]` | float32 | 归一化车辆容量，CVRP 中通常为 1.0 |
-| `num_vehicles` | scalar | int | 车辆数 M |
+| `num_vehicles` | scalar / `[B]` | int | 运行时车辆数 M；不是网络参数 |
 
 #### 分簇模型内部 tensor
 
@@ -813,13 +813,19 @@ TAM Step2 的“冻结 TSP 评价器”版本
 
 当前分簇网络是一次性输出 `[B, M, N]`，所以：
 
-- 车辆数通过输出维度 `M` 固定；
+- 车辆数通过运行时输出维度 `M` 决定；同一个权重可以用于不同的 M；
 - 没有“下一次是否访问 depot”的顺序决策；
 - 没有 TAM 式 global mask；
 - 空簇允许存在。
 
 如果问题需要固定使用所有车辆，或者需要严格限制实际使用车辆数，还需要增加
 额外的车辆使用约束。
+
+注意：结构上可接收不同的 M，不等于训练过的模型可以在不同 M 上零样本泛化。
+如果训练只见过 M=5，推断时直接使用 M=7，输出维度虽然可以正常计算，但
+vehicle 竞争、PE 的 m 分布和 partition 行为都处于训练分布之外。要真正训练
+一个跨 M 复用的模型，需要在训练时随机化车辆数量并对无效 vehicle 做 padding
+和 mask。
 
 ### 11.3 静态容量 mask 不等于累计容量可行
 

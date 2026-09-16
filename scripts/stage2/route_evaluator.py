@@ -143,11 +143,10 @@ class RouteEvaluator:
         return torch.cat(rewards, dim=0)
 
     def _cluster_costs(
-        self, td: TensorDict, assignments: torch.Tensor
+        self, td: TensorDict, assignments: torch.Tensor, num_vehicles: int
     ) -> torch.Tensor:
         """Evaluate all clusters in one padded batch."""
         batch_size, num_nodes = assignments.shape
-        num_vehicles = self.config.num_vehicles
         device = td.device
 
         depot = td["locs"][:, :1, :]
@@ -184,7 +183,10 @@ class RouteEvaluator:
 
     @torch.no_grad()
     def evaluate(
-        self, td: TensorDict, assignments: torch.Tensor
+        self,
+        td: TensorDict,
+        assignments: torch.Tensor,
+        num_vehicles: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Return per-vehicle costs and per-vehicle capacity overflow."""
         device = td.device
@@ -194,7 +196,9 @@ class RouteEvaluator:
             self.route_env = self.route_env.to(device)
         assignments = assignments.to(device)
         batch_size, num_nodes = assignments.shape
-        num_vehicles = self.config.num_vehicles
+        if num_vehicles is None:
+            num_vehicles = int(assignments.max().item()) + 1
+        num_vehicles = int(num_vehicles)
         if assignments.max() >= num_vehicles or assignments.min() < 0:
             raise ValueError("assignment 超出车辆编号范围")
 
@@ -214,5 +218,5 @@ class RouteEvaluator:
         )
         cluster_demand.scatter_add_(1, assignments, demand)
         overflow = torch.clamp(cluster_demand - capacity, min=0)
-        costs = self._cluster_costs(td, assignments)
+        costs = self._cluster_costs(td, assignments, num_vehicles)
         return costs, overflow

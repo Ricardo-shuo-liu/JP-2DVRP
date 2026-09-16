@@ -290,6 +290,7 @@ def _decode_chunk(
     decode_type: str,
     width: int,
     max_parallel: int | None = None,
+    pomo_num_starts: int = 0,
 ) -> torch.Tensor:
     """Return best reward per original instance in ``td``."""
     num_instances = td.batch_size[0]
@@ -317,6 +318,8 @@ def _decode_chunk(
             )
             model.policy.test_decode_type = policy_decode
             num_starts = env.get_num_starts(td_reset)
+            if pomo_num_starts > 0:
+                num_starts = min(num_starts, pomo_num_starts)
             out = model.policy(
                 td_reset,
                 env,
@@ -392,6 +395,7 @@ def evaluate_run(run: Run, td: TensorDict, args) -> dict:
                 decode_type=args.decode_type,
                 width=args.width,
                 max_parallel=args.max_parallel,
+                pomo_num_starts=args.pomo_num_starts,
             )
             rewards.append(reward.detach().cpu())
             progress.update(end)
@@ -753,6 +757,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=2048,
         help="sampling 时单次并行展开的最大轨迹数（不含 POMO 内部多起点）",
+    )
+    parser.add_argument(
+        "--pomo-num-starts",
+        type=int,
+        default=0,
+        help="POMO 使用的起点数；0 表示使用环境默认的全部起点",
     )
     parser.add_argument("--seed", type=int, default=1234)
     parser.add_argument("--device", default="auto", help="cpu / cuda / auto")

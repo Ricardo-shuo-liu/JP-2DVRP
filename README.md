@@ -268,6 +268,11 @@ Each Stage 2 experiment fixes the vehicle count through `--num-vehicles`.
 `--penalty` controls the capacity-overflow penalty, and `--baseline` accepts
 `rollout` (paper-style default), `exponential`, or `no`.
 
+`num_vehicles` is a runtime dimension, not a model parameter. The partition
+network has no M-dependent parameters, so the same weights can be evaluated
+with a different vehicle count by passing a different runtime `num_vehicles`.
+The current training data generator still uses one fixed M per run.
+
 The Stage 2 objective can be either total route length or the maximum route
 length:
 

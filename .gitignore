@@ -9,6 +9,11 @@ __pycache__/
 
 
 data/tsp20/test.npz
+data/tsp10/test.npz
+data/tsp50/test.npz
+data/tsp100/test.npz
+data/tsp200/test.npz
+
 logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/epoch_094.ckpt
 logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt
 

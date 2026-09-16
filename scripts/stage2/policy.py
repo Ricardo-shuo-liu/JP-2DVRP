@@ -23,7 +23,7 @@ class Stage2Policy(nn.Module):
         self,
         partition_network: PartitionNetwork,
         route_evaluator: RouteEvaluator,
-        num_vehicles: int,
+        num_vehicles: int | None = None,
         objective: str = "minmax",
         penalty: float = 10.0,
         capacity_mask_mode: str = "static",
@@ -39,6 +39,31 @@ class Stage2Policy(nn.Module):
         self.objective = objective
         self.penalty = penalty
         self.capacity_mask_mode = capacity_mask_mode
+
+    def _resolve_num_vehicles(self, td: TensorDict, explicit=None) -> int:
+        """Resolve M at runtime so one trained network can serve different fleets."""
+        if explicit is not None:
+            return int(explicit)
+        if td is not None and "num_vehicles" in td.keys():
+            value = td["num_vehicles"]
+            if torch.is_tensor(value):
+                value = value.reshape(-1)
+                if value.numel() == 0:
+                    raise ValueError("num_vehicles 是空 tensor")
+                # A single scalar or a batch with a homogeneous vehicle count.
+                if not torch.all(value == value[0]):
+                    raise ValueError(
+                        "当前 policy 一次 forward 只支持同一个 num_vehicles；"
+                        "如需 batch 内混合车辆数，需要额外的 vehicle padding/mask"
+                    )
+                return int(value[0].item())
+            return int(value)
+        if self.num_vehicles is not None:
+            return int(self.num_vehicles)
+        raise ValueError(
+            "未提供 num_vehicles，且 td 中没有 num_vehicles，"
+            "policy 也没有默认车辆数"
+        )
 
     @staticmethod
     def _sample_independent(logits, phase, decode_type):
@@ -62,12 +87,11 @@ class Stage2Policy(nn.Module):
         phase: str,
         decode_type: str | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Assign nodes while disabling vehicle choices that exceed capacity.
+        """Assign each node independently, optionally using a static mask.
 
-        ``sequential`` uses a deterministic demand-descending order and masks
-        each vehicle whose current load plus the current demand is infeasible.
-        The resulting log-likelihood is the sum of the masked per-node log
-        probabilities, so REINFORCE remains well-defined.
+        The static mask disables a vehicle for a node when that vehicle's
+        capacity is smaller than the node's demand.  It does not depend on
+        other nodes or on the order of nodes.
         """
         if self.capacity_mask_mode == "none":
             return self._sample_independent(logits, phase, decode_type)
@@ -78,8 +102,8 @@ class Stage2Policy(nn.Module):
             capacity.unsqueeze(-1) + 1e-6
         )
         any_feasible = feasible.any(dim=1, keepdim=True)
-        # If a node cannot fit any vehicle, keep choices enabled as a fallback;
-        # the post-assignment overflow and total-capacity penalties handle it.
+        # If a node cannot fit any vehicle, keep choices enabled as a
+        # fallback; the post-assignment overflow penalty handles it.
         feasible = torch.where(
             any_feasible, feasible, torch.ones_like(feasible)
         )
@@ -92,6 +116,7 @@ class Stage2Policy(nn.Module):
         env=None,
         phase: str = "train",
         decode_type: str | None = None,
+        num_vehicles: int | None = None,
         **kwargs,
     ) -> dict:
         # td is already reset by REINFORCE.shared_step
@@ -106,13 +131,14 @@ class Stage2Policy(nn.Module):
             capacity = torch.ones(batch_size, 1, device=demand.device)
         capacity = capacity.reshape(batch_size, 1)
 
-        logits = self.partition_network(td, self.num_vehicles)  # [B,M,N]
+        num_vehicles = self._resolve_num_vehicles(td, num_vehicles)
+        logits = self.partition_network(td, num_vehicles)  # [B,M,N]
         assignments, assign_logp = self._capacity_aware_assignments(
             logits, demand, capacity, phase, decode_type
         )
 
         costs, overflow = self.route_evaluator.evaluate(
-            td, assignments
+            td, assignments, num_vehicles=num_vehicles
         )
         penalized_costs = costs + self.penalty * overflow
         if self.objective == "minmax":
