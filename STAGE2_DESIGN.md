@@ -910,8 +910,10 @@ val/max_route
 
 ### 12.4 Padding 构造优化
 
-TSP forward 已经批量化，但构造 `[B * M, cluster_len, 2]` 仍使用 Python
-循环。后续可以用 scatter/index 操作进一步加速。
+构造 `[B * M, cluster_len, 2]` 已改为向量化实现：通过 stable argsort、
+cummax、cluster rank 和 advanced indexing 一次完成 cluster 成员收集与
+padding，不再使用 `(batch, vehicle)` Python 双层循环。TSP forward 仍然
+按 `--route-eval-batch-size` 分块执行，以控制显存。
 
 ### 12.5 POMO/MDAM 不是当前主要验证路径
 

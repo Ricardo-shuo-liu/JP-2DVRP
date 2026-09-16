@@ -151,26 +151,48 @@ class RouteEvaluator:
 
         depot = td["locs"][:, :1, :]
         customer_locs = td["locs"][:, 1:, :]
-        member_indices = []
-        max_members = 0
-        for b in range(batch_size):
-            row = []
-            for m in range(num_vehicles):
-                idx = (assignments[b] == m).nonzero(as_tuple=False).squeeze(-1)
-                row.append(idx)
-                max_members = max(max_members, int(idx.numel()))
-            member_indices.append(row)
 
-        max_members = max(max_members, int(self.config.route_pad_to))
+        # Sort nodes by cluster id and compute each node's position inside its
+        # cluster without Python loops over (batch, vehicle).
+        order = torch.argsort(assignments, dim=1, stable=True)
+        sorted_assignments = assignments.gather(1, order)
+        is_new_cluster = torch.ones_like(sorted_assignments, dtype=torch.bool)
+        is_new_cluster[:, 1:] = (
+            sorted_assignments[:, 1:] != sorted_assignments[:, :-1]
+        )
+        positions = torch.arange(num_nodes, device=device).expand(
+            batch_size, num_nodes
+        )
+        cluster_starts = torch.where(
+            is_new_cluster,
+            positions,
+            torch.zeros_like(positions),
+        )
+        cluster_starts = torch.cummax(cluster_starts, dim=1).values
+        rank_sorted = positions - cluster_starts
+        rank = torch.empty_like(rank_sorted)
+        rank.scatter_(1, order, rank_sorted)
+
+        cluster_counts = torch.zeros(
+            batch_size, num_vehicles, device=device, dtype=torch.long
+        )
+        cluster_counts.scatter_add_(
+            1,
+            assignments,
+            torch.ones_like(assignments, dtype=torch.long),
+        )
+        max_members = max(
+            int(cluster_counts.max().item()),
+            int(self.config.route_pad_to),
+        )
         cluster_len = max(2, max_members + 1)
-        padded = depot[:, None, :].expand(
+        padded = depot[:, None, :, :].expand(
             batch_size, num_vehicles, cluster_len, 2
         ).clone()
-        for b in range(batch_size):
-            for m in range(num_vehicles):
-                members = member_indices[b][m]
-                if members.numel() > 0:
-                    padded[b, m, 1 : 1 + members.numel()] = customer_locs[b, members]
+        batch_index = torch.arange(batch_size, device=device)[:, None].expand(
+            batch_size, num_nodes
+        )
+        padded[batch_index, assignments, 1 + rank] = customer_locs
 
         cluster_td = TensorDict(
             {"locs": padded.reshape(batch_size * num_vehicles, cluster_len, 2)},
