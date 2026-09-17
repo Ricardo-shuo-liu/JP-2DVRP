@@ -14,7 +14,10 @@ class Config(BaseConfig):
     env: str = "CVRPEnv"
     num_loc: int = 50
     capacity: Optional[float] = None  # None 表示使用 RL4CO 按节点数的默认容量
-    num_vehicles: int = 8
+    num_vehicles: Optional[int] = 8
+    num_vehicles_min: Optional[int] = None
+    num_vehicles_max: Optional[int] = None
+    vehicle_count_margin: int = 0
     objective: str = "minmax"  # sum / minmax
     penalty: float = 10.0
     capacity_mask_mode: str = "static"  # none / static

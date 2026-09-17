@@ -187,13 +187,17 @@ def solve_tsp_ortools(
 
 
 def find_lkh_executable(lkh_path: str | None = None) -> str:
+    """定位 LKH-3 可执行文件，始终返回绝对路径。
+
+    返回绝对路径很重要：CVRP 求解时会在临时目录里启动子进程，相对路径会失效。
+    """
     if lkh_path:
         path = Path(lkh_path)
         if path.is_file() and os.access(path, os.X_OK):
-            return str(path)
+            return str(path.resolve())
         found = shutil.which(lkh_path)
         if found:
-            return found
+            return str(Path(found).resolve())
         raise FileNotFoundError(
             f"找不到可执行的 LKH-3 文件: {lkh_path}"
         )
@@ -204,12 +208,12 @@ def find_lkh_executable(lkh_path: str | None = None) -> str:
         (repo_root / "assets" / "solver").glob("LKH-*/LKH")
     ):
         if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
+            return str(candidate.resolve())
 
     for name in ("LKH", "LKH-3", "lkh"):
         found = shutil.which(name)
         if found:
-            return found
+            return str(Path(found).resolve())
     raise FileNotFoundError(
         "找不到 LKH-3 可执行文件。请用 --lkh-path 指定，或把 LKH 加入 PATH。"
     )

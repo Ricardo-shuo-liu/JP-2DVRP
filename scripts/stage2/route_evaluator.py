@@ -37,9 +37,15 @@ def build_fresh_route_model(config: Config):
             f"可用: {', '.join(SUPPORTED_ROUTE_MODELS)}"
         )
 
+    num_vehicles = (
+        config.num_vehicles
+        or config.num_vehicles_max
+        or config.num_vehicles_min
+        or 1
+    )
     env = make_env(
         "TSPEnv",
-        num_loc=max(config.num_loc // max(config.num_vehicles, 1), 5),
+        num_loc=max(config.num_loc // max(num_vehicles, 1), 5),
         check_solution=False,
     )
     model = model_cls(
@@ -208,9 +214,9 @@ class RouteEvaluator:
         self,
         td: TensorDict,
         assignments: torch.Tensor,
-        num_vehicles: int | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return per-vehicle costs and per-vehicle capacity overflow."""
+        vehicle_counts: torch.Tensor | int | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return per-vehicle costs, overflow, and the valid-vehicle mask."""
         device = td.device
         if next(self.policy.parameters()).device != device:
             self.policy = self.policy.to(device)
@@ -218,11 +224,40 @@ class RouteEvaluator:
             self.route_env = self.route_env.to(device)
         assignments = assignments.to(device)
         batch_size, num_nodes = assignments.shape
-        if num_vehicles is None:
-            num_vehicles = int(assignments.max().item()) + 1
-        num_vehicles = int(num_vehicles)
-        if assignments.max() >= num_vehicles or assignments.min() < 0:
+        if vehicle_counts is None:
+            vehicle_counts = torch.full(
+                (batch_size,),
+                int(assignments.max().item()) + 1,
+                dtype=torch.long,
+                device=device,
+            )
+        elif not torch.is_tensor(vehicle_counts):
+            vehicle_counts = torch.full(
+                (batch_size,),
+                int(vehicle_counts),
+                dtype=torch.long,
+                device=device,
+            )
+        else:
+            vehicle_counts = vehicle_counts.reshape(-1).to(device).long()
+            if vehicle_counts.numel() == 1:
+                vehicle_counts = vehicle_counts.expand(batch_size)
+            if vehicle_counts.numel() != batch_size:
+                raise ValueError(
+                    "vehicle_counts 数量必须等于 batch_size"
+                )
+
+        max_vehicles = int(vehicle_counts.max().item())
+        valid_vehicle = (
+            torch.arange(max_vehicles, device=device)[None, :]
+            < vehicle_counts[:, None]
+        )
+        if assignments.max() >= max_vehicles or assignments.min() < 0:
             raise ValueError("assignment 超出车辆编号范围")
+        if not valid_vehicle.gather(
+            1, assignments.clamp_max(max_vehicles - 1)
+        ).all():
+            raise ValueError("assignment 含无效车辆编号")
 
         demand = td["demand"]
         if demand.dim() == 3:
@@ -236,9 +271,10 @@ class RouteEvaluator:
             capacity = torch.ones(batch_size, 1, device=device)
         capacity = capacity.reshape(batch_size, 1)
         cluster_demand = torch.zeros(
-            batch_size, num_vehicles, device=device, dtype=demand.dtype
+            batch_size, max_vehicles, device=device, dtype=demand.dtype
         )
         cluster_demand.scatter_add_(1, assignments, demand)
         overflow = torch.clamp(cluster_demand - capacity, min=0)
-        costs = self._cluster_costs(td, assignments, num_vehicles)
-        return costs, overflow
+        overflow = overflow * valid_vehicle
+        costs = self._cluster_costs(td, assignments, max_vehicles)
+        return costs, overflow, valid_vehicle

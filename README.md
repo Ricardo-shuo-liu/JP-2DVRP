@@ -288,6 +288,27 @@ python -m scripts.stage2.run_stage2 \
     --route-pad-to 20
 ```
 
+To train one model with a random feasible vehicle count per instance:
+
+```bash
+python -m scripts.stage2.run_stage2 \
+    --num-loc 100 \
+    --num-vehicles-min 8 \
+    --num-vehicles-max 16 \
+    --vehicle-count-margin 1 \
+    --capacity 50 \
+    --objective minmax \
+    --capacity-mask-mode static \
+    --penalty 10.0 \
+    --route-model AttentionModel \
+    --route-checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --route-pad-to 20 \
+    --route-eval-batch-size 1024 \
+    --baseline rollout \
+    --epochs 100 \
+    --batch-size 1024
+```
+
 - `--objective minmax` uses `max_k TSP(cluster_k)`; `sum` uses the
   conventional total CVRP length.
 - `--capacity-mask-mode static` disables `(vehicle, node)` entries whose
@@ -310,6 +331,34 @@ Every cluster is then solved by the frozen Stage 1 TSP model. Training updates
 the partition network only; Stage 1 routing parameters remain frozen.
 
 ## Help and common errors
+
+### End-to-end CVRP baselines
+
+To compare Stage2 against a single end-to-end neural CVRP model, use the
+independent baseline entry point:
+
+```bash
+# Attention Model, end-to-end CVRP
+python -m scripts.baselines.run_cvrp_model \
+    -m AttentionModel \
+    --num-loc 100 --num-vehicles 12 --capacity 50 \
+    --epochs 100 --batch-size 512 --train-data-size 1280000 \
+    --lr 1e-4 --num-encoder-layers 3 --normalization batch \
+    --baseline rollout --precision 32
+
+# POMO, end-to-end CVRP
+python -m scripts.baselines.run_cvrp_model \
+    -m POMO \
+    --num-loc 100 --num-vehicles 12 --capacity 50 \
+    --epochs 100 --batch-size 64 --train-data-size 100000 \
+    --lr 1e-4 --num-encoder-layers 6 --normalization instance \
+    --num-starts 0 --precision 32
+```
+
+The baseline uses RL4CO's `CVRPEnv`. `num_vehicles` is used to filter online
+data by total fleet capacity; the standard end-to-end CVRP decoder itself does
+not enforce a hard maximum vehicle count. State this explicitly when comparing
+it with the Stage2 fixed-`M` model.
 
 ```bash
 python -m scripts.stage1.run_stage1 --help

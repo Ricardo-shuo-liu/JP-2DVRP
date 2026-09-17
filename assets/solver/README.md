@@ -87,6 +87,40 @@ Useful related options:
 - `--solver-num-procs`: number of worker processes used by the evaluator.
 - `--progress-interval`: progress/ETA reporting interval; `0` disables it.
 
+## CVRP baselines (Stage 2)
+
+`utils/solvers/cvrp.py` wraps the same executable for capacitated VRP, and
+`scripts/stage2/eval_cvrp.py` evaluates a Stage 2 test file with it:
+
+```bash
+python -m scripts.stage2.eval_cvrp \
+    --data-file data/cvrp100/test.npz \
+    --num-instances 100 \
+    --solvers lkh \
+    --objectives minsum minmax \
+    --lkh-path assets/solver/LKH-3.0.14/LKH \
+    --output assets/results/cvrp100_baseline.json
+```
+
+- `--objectives minsum` is LKH's native CVRP objective (minimum total route
+  length).
+- `--objectives minmax` matches the Stage 2 reward (minimum longest single
+  route). LKH-3 has no native min-max CVRP objective: `MTSP_OBJECTIVE = MINMAX`
+  is ignored for `TYPE: CVRP` (see `SRC/MTSP2TSP.c`), and the `TYPE: CCVRP` +
+  `MINMAX` combination optimizes a different internal quantity that does not
+  correspond to route lengths. The wrapper therefore binary-searches the
+  per-route length limit (`DISTANCE = λ`) and keeps the best feasible solution
+  found. The reported value is a strong heuristic upper bound, not a proven
+  optimum.
+- Route costs, loads and capacity violations are always recomputed from the
+  coordinates on the Python side; the `Cost` printed by LKH is expressed in an
+  internal transformed scale and is not used as the result.
+
+Accuracy check against exhaustive enumeration (6 customers, 2-3 vehicles, all
+partitions and all route permutations): the min-sum value matched the exact
+optimum in 16/17 instances, and the min-max binary search matched the exact
+min-max optimum in 14/17 instances with a worst observed gap of about 3.6%.
+
 ## Portability
 
 The bundled binary was built for the build machine's CPU. If it is moved to a

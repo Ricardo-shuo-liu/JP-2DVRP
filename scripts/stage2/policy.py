@@ -40,26 +40,56 @@ class Stage2Policy(nn.Module):
         self.penalty = penalty
         self.capacity_mask_mode = capacity_mask_mode
 
-    def _resolve_num_vehicles(self, td: TensorDict, explicit=None) -> int:
-        """Resolve M at runtime so one trained network can serve different fleets."""
+    def _resolve_vehicle_counts(
+        self, td: TensorDict, explicit=None, batch_size: int | None = None
+    ) -> torch.Tensor:
+        """Resolve per-instance M so one network can serve variable fleets."""
+        if batch_size is None:
+            demand = td["demand"]
+            batch_size = demand.shape[0]
+
         if explicit is not None:
-            return int(explicit)
+            if torch.is_tensor(explicit):
+                counts = explicit.reshape(-1)
+            else:
+                counts = torch.full(
+                    (batch_size,),
+                    int(explicit),
+                    dtype=torch.long,
+                    device=td.device,
+                )
+            if counts.numel() == 1:
+                counts = counts.expand(batch_size)
+            if counts.numel() != batch_size:
+                raise ValueError(
+                    f"num_vehicles 数量 {counts.numel()} 与 batch {batch_size} 不一致"
+                )
+            return counts.to(td.device).long()
+
         if td is not None and "num_vehicles" in td.keys():
             value = td["num_vehicles"]
             if torch.is_tensor(value):
                 value = value.reshape(-1)
-                if value.numel() == 0:
-                    raise ValueError("num_vehicles 是空 tensor")
-                # A single scalar or a batch with a homogeneous vehicle count.
-                if not torch.all(value == value[0]):
+                if value.numel() == 1:
+                    value = value.expand(batch_size)
+                if value.numel() != batch_size:
                     raise ValueError(
-                        "当前 policy 一次 forward 只支持同一个 num_vehicles；"
-                        "如需 batch 内混合车辆数，需要额外的 vehicle padding/mask"
+                        f"num_vehicles 数量 {value.numel()} 与 batch {batch_size} 不一致"
                     )
-                return int(value[0].item())
-            return int(value)
+                return value.to(td.device).long()
+            return torch.full(
+                (batch_size,),
+                int(value),
+                dtype=torch.long,
+                device=td.device,
+            )
         if self.num_vehicles is not None:
-            return int(self.num_vehicles)
+            return torch.full(
+                (batch_size,),
+                int(self.num_vehicles),
+                dtype=torch.long,
+                device=td.device,
+            )
         raise ValueError(
             "未提供 num_vehicles，且 td 中没有 num_vehicles，"
             "policy 也没有默认车辆数"
@@ -84,6 +114,7 @@ class Stage2Policy(nn.Module):
         logits: torch.Tensor,
         demand: torch.Tensor,
         capacity: torch.Tensor,
+        valid_vehicle: torch.Tensor,
         phase: str,
         decode_type: str | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -94,18 +125,22 @@ class Stage2Policy(nn.Module):
         other nodes or on the order of nodes.
         """
         if self.capacity_mask_mode == "none":
-            return self._sample_independent(logits, phase, decode_type)
+            masked_logits = logits.masked_fill(
+                ~valid_vehicle[:, :, None], float("-inf")
+            )
+            return self._sample_independent(masked_logits, phase, decode_type)
 
         # Static capacity mask: for each node, disable vehicles whose capacity
         # is smaller than that node's demand.  This is independent over nodes.
         feasible = demand.unsqueeze(1) <= (
             capacity.unsqueeze(-1) + 1e-6
         )
+        feasible = feasible & valid_vehicle[:, :, None]
         any_feasible = feasible.any(dim=1, keepdim=True)
         # If a node cannot fit any vehicle, keep choices enabled as a
         # fallback; the post-assignment overflow penalty handles it.
         feasible = torch.where(
-            any_feasible, feasible, torch.ones_like(feasible)
+            any_feasible, feasible, valid_vehicle[:, :, None]
         )
         masked_logits = logits.masked_fill(~feasible, float("-inf"))
         return self._sample_independent(masked_logits, phase, decode_type)
@@ -131,20 +166,31 @@ class Stage2Policy(nn.Module):
             capacity = torch.ones(batch_size, 1, device=demand.device)
         capacity = capacity.reshape(batch_size, 1)
 
-        num_vehicles = self._resolve_num_vehicles(td, num_vehicles)
-        logits = self.partition_network(td, num_vehicles)  # [B,M,N]
+        vehicle_counts = self._resolve_vehicle_counts(
+            td, num_vehicles, batch_size=batch_size
+        )
+        max_vehicles = int(vehicle_counts.max().item())
+        valid_vehicle = (
+            torch.arange(max_vehicles, device=demand.device)[None, :]
+            < vehicle_counts[:, None]
+        )
+        logits = self.partition_network(td, max_vehicles)  # [B,M,N]
         assignments, assign_logp = self._capacity_aware_assignments(
-            logits, demand, capacity, phase, decode_type
+            logits, demand, capacity, valid_vehicle, phase, decode_type
         )
 
-        costs, overflow = self.route_evaluator.evaluate(
-            td, assignments, num_vehicles=num_vehicles
+        costs, overflow, valid_vehicle = self.route_evaluator.evaluate(
+            td, assignments, vehicle_counts=vehicle_counts
         )
         penalized_costs = costs + self.penalty * overflow
         if self.objective == "minmax":
-            objective_cost = penalized_costs.max(dim=1).values
+            objective_cost = penalized_costs.masked_fill(
+                ~valid_vehicle, float("-inf")
+            ).max(dim=1).values
         else:
-            objective_cost = penalized_costs.sum(dim=1)
+            objective_cost = (
+                penalized_costs * valid_vehicle
+            ).sum(dim=1)
         reward = -objective_cost
 
         return {
@@ -155,4 +201,6 @@ class Stage2Policy(nn.Module):
             "objective_cost": objective_cost,
             "overflow": overflow.sum(dim=1),
             "overflow_per_vehicle": overflow,
+            "vehicle_counts": vehicle_counts,
+            "valid_vehicle": valid_vehicle,
         }

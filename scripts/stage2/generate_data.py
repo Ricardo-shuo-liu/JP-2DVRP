@@ -22,7 +22,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from utils.data import canonical_cvrp_td, feasible_cvrp_mask, make_env, save_td
+from utils.data import (
+    CVRPEnvWithVehicleCount,
+    VariableVehicleCVRPGenerator,
+    canonical_cvrp_td,
+    feasible_cvrp_mask,
+    make_env,
+    save_td,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -31,6 +38,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--num-loc", type=int, default=50)
     parser.add_argument("--capacity", type=float, default=None)
     parser.add_argument("--num-vehicles", type=int, default=8)
+    parser.add_argument("--num-vehicles-min", type=int, default=None)
+    parser.add_argument("--num-vehicles-max", type=int, default=None)
+    parser.add_argument("--vehicle-count-margin", type=int, default=0)
     parser.add_argument("--num-samples", "-n", type=int, default=10_000)
     parser.add_argument("--split", choices=("train", "val", "test"), default="test")
     parser.add_argument("-o", "--out-dir", default=None)
@@ -79,12 +89,32 @@ def main():
     if args.capacity is not None:
         generator_params["capacity"] = args.capacity
 
-    env = make_env(
-        "CVRPEnv",
-        num_loc=args.num_loc,
-        generator_params=generator_params,
-        check_solution=False,
+    variable_vehicles = (
+        args.num_vehicles_min is not None or args.num_vehicles_max is not None
     )
+    if variable_vehicles:
+        if args.num_vehicles_min is None or args.num_vehicles_max is None:
+            raise SystemExit(
+                "变量车辆数模式需要同时指定 --num-vehicles-min 和 --num-vehicles-max"
+            )
+        generator = VariableVehicleCVRPGenerator(
+            num_loc=args.num_loc,
+            num_vehicles_min=args.num_vehicles_min,
+            num_vehicles_max=args.num_vehicles_max,
+            vehicle_count_margin=args.vehicle_count_margin,
+            **generator_params,
+        )
+        env = CVRPEnvWithVehicleCount(
+            generator=generator,
+            check_solution=False,
+        )
+    else:
+        env = make_env(
+            "CVRPEnv",
+            num_loc=args.num_loc,
+            generator_params=generator_params,
+            check_solution=False,
+        )
     out_path = (
         Path(args.filename)
         if args.filename
@@ -104,7 +134,10 @@ def main():
 
     while accepted_count < args.num_samples:
         td = env.generator(batch_size)
-        mask = feasible_cvrp_mask(td, args.num_vehicles)
+        if variable_vehicles:
+            mask = torch.ones(td.batch_size[0], dtype=torch.bool)
+        else:
+            mask = feasible_cvrp_mask(td, args.num_vehicles)
         if mask.any():
             keep = mask
             remaining = args.num_samples - accepted_count
@@ -114,22 +147,28 @@ def main():
                 keep = torch.zeros_like(mask)
                 keep[idx] = True
             part = canonical_cvrp_td(td[keep])
-            part.set(
-                "num_vehicles",
-                torch.full(
-                    (part.batch_size[0], 1),
-                    args.num_vehicles,
-                    dtype=torch.int64,
-                ),
-            )
+            if not variable_vehicles:
+                part.set(
+                    "num_vehicles",
+                    torch.full(
+                        (part.batch_size[0], 1),
+                        args.num_vehicles,
+                        dtype=torch.int64,
+                    ),
+                )
             accepted.append(part)
             accepted_count += part.batch_size[0]
 
     td_all = torch.cat(accepted, dim=0)
     saved = save_td(td_all, out_path, compress=args.compress)
+    vehicle_text = (
+        f"{args.num_vehicles_min}-{args.num_vehicles_max} (random)"
+        if variable_vehicles
+        else str(args.num_vehicles)
+    )
     print(
         f"CVRP: num_loc={args.num_loc}, capacity={env.generator.capacity}, "
-        f"num_vehicles={args.num_vehicles}, samples={td_all.batch_size[0]}"
+        f"num_vehicles={vehicle_text}, samples={td_all.batch_size[0]}"
     )
     print(
         "字段: "

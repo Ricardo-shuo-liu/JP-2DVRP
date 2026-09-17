@@ -272,6 +272,27 @@ python -m scripts.stage2.run_stage2 \
     --route-pad-to 20
 ```
 
+如果希望每个实例随机一个可行车辆数，让一个模型适配不同 M：
+
+```bash
+python -m scripts.stage2.run_stage2 \
+    --num-loc 100 \
+    --num-vehicles-min 8 \
+    --num-vehicles-max 16 \
+    --vehicle-count-margin 1 \
+    --capacity 50 \
+    --objective minmax \
+    --capacity-mask-mode static \
+    --penalty 10.0 \
+    --route-model AttentionModel \
+    --route-checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --route-pad-to 20 \
+    --route-eval-batch-size 1024 \
+    --baseline rollout \
+    --epochs 100 \
+    --batch-size 1024
+```
+
 - `--objective minmax` 使用 `max_k TSP(cluster_k)`；`sum` 使用传统总路程目标。
 - `--capacity-mask-mode static` 将“车辆容量小于该节点需求”的 `(vehicle, node)`
   位置直接掩码；各节点分配仍相互独立，累计容量溢出由分配后的惩罚处理。
@@ -287,6 +308,32 @@ Stage2 分簇网络输出 `[batch, num_vehicles, num_nodes]` logits，为每个�
 训练损失只更新分簇网络，不更新 Stage1 路由参数。
 
 ## 查看参数与常见错误
+
+### 端到端 CVRP 对比模型
+
+如果需要和 Stage2 对比端到端神经网络求解 CVRP，可以使用独立入口：
+
+```bash
+# Attention Model 端到端训练 CVRP
+python -m scripts.baselines.run_cvrp_model \
+    -m AttentionModel \
+    --num-loc 100 --num-vehicles 12 --capacity 50 \
+    --epochs 100 --batch-size 512 --train-data-size 1280000 \
+    --lr 1e-4 --num-encoder-layers 3 --normalization batch \
+    --baseline rollout --precision 32
+
+# POMO 端到端训练 CVRP
+python -m scripts.baselines.run_cvrp_model \
+    -m POMO \
+    --num-loc 100 --num-vehicles 12 --capacity 50 \
+    --epochs 100 --batch-size 64 --train-data-size 100000 \
+    --lr 1e-4 --num-encoder-layers 6 --normalization instance \
+    --num-starts 0 --precision 32
+```
+
+该 baseline 使用 RL4CO 的 `CVRPEnv`。`num_vehicles` 只用于在线数据生成时过滤
+总车队容量；标准端到端 CVRP decoder 本身不硬限制最大车辆数，因此和 Stage2
+固定 `M` 模型比较时需要在实验说明中写清楚这一点。
 
 ```bash
 python -m scripts.stage1.run_stage1 --help

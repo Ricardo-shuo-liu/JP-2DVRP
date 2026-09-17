@@ -57,6 +57,77 @@ class FeasibleCVRPGenerator(CVRPGenerator):
         )
 
 
+class VariableVehicleCVRPGenerator(CVRPGenerator):
+    """Generate CVRP samples with a random feasible vehicle count per instance."""
+
+    def __init__(
+        self,
+        num_vehicles_min: int,
+        num_vehicles_max: int,
+        vehicle_count_margin: int = 0,
+        max_attempts: int = 10_000,
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        if num_vehicles_min < 1:
+            raise ValueError("num_vehicles_min 必须 >= 1")
+        if num_vehicles_max < num_vehicles_min:
+            raise ValueError("num_vehicles_max 必须 >= num_vehicles_min")
+        self.num_vehicles_min = int(num_vehicles_min)
+        self.num_vehicles_max = int(num_vehicles_max)
+        self.vehicle_count_margin = int(vehicle_count_margin)
+        self.max_attempts = int(max_attempts)
+
+    def _sample_counts(self, td: TensorDict):
+        # demand is normalized by capacity in RL4CO's CVRP generator.
+        total_demand = td["demand"].sum(-1)
+        lower = torch.ceil(total_demand).long() + self.vehicle_count_margin
+        lower = lower.clamp_min(self.num_vehicles_min)
+        feasible = lower <= self.num_vehicles_max
+        return lower, feasible
+
+    def _generate(self, batch_size) -> TensorDict:
+        target = int(batch_size[0])
+        accepted: list[TensorDict] = []
+        accepted_count = 0
+
+        for _ in range(self.max_attempts):
+            td = super()._generate(batch_size)
+            lower, feasible = self._sample_counts(td)
+            if not bool(feasible.any()):
+                continue
+
+            remaining = target - accepted_count
+            idx = torch.nonzero(feasible, as_tuple=False).squeeze(-1)[:remaining]
+            part = td[idx]
+            lower = lower[idx]
+            span = self.num_vehicles_max - lower + 1
+            random_offset = torch.floor(
+                torch.rand(lower.shape, device=lower.device) * span
+            ).long()
+            counts = lower + random_offset
+            part.set("num_vehicles", counts[:, None])
+            accepted.append(part)
+            accepted_count += part.batch_size[0]
+            if accepted_count >= target:
+                return torch.cat(accepted, dim=0)[:target]
+
+        raise RuntimeError(
+            "无法生成变量车辆数的 CVRP batch；"
+            "请增大 --num-vehicles-max 或调小 --vehicle-count-margin"
+        )
+
+
+class CVRPEnvWithVehicleCount(CVRPEnv):
+    """CVRPEnv that keeps a per-instance ``num_vehicles`` field after reset."""
+
+    def _reset(self, td=None, batch_size=None):
+        out = super()._reset(td=td, batch_size=batch_size)
+        if td is not None and "num_vehicles" in td.keys():
+            out.set("num_vehicles", td["num_vehicles"].to(out.device))
+        return out
+
+
 def add_npz_extension(path: str | Path) -> Path:
     path = Path(path)
     return path if path.suffix == ".npz" else Path(f"{path}.npz")
@@ -105,15 +176,15 @@ def canonical_cvrp_td(td: TensorDict) -> TensorDict:
     ``CVRPEnv.load_data`` performs exactly one normalization step.
     """
     capacity = td["capacity"]  # [B,1] from RL4CO CVRPGenerator
-    return TensorDict(
-        {
-            "locs": td["locs"],
-            "depot": td["depot"],
-            "demand": td["demand"] * capacity,
-            "capacity": capacity.squeeze(-1),  # official npz format: [B]
-        },
-        batch_size=td.batch_size,
-    )
+    data = {
+        "locs": td["locs"],
+        "depot": td["depot"],
+        "demand": td["demand"] * capacity,
+        "capacity": capacity.squeeze(-1),  # official npz format: [B]
+    }
+    if "num_vehicles" in td.keys():
+        data["num_vehicles"] = td["num_vehicles"]
+    return TensorDict(data, batch_size=td.batch_size)
 
 
 def save_td(td: TensorDict, path: str | Path, compress: bool = False) -> Path:

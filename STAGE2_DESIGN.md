@@ -60,6 +60,29 @@ Stage1 路由评价器：AttentionModel
 baseline：rollout
 ```
 
+当训练一个跨车辆数复用的模型时，车辆数可以改成随机变量：
+
+```text
+M_i ~ Uniform{num_vehicles_min, ..., num_vehicles_max}
+```
+
+每个样本的最小可行车辆数由总需求决定：
+
+```text
+M_min = ceil(sum(demand) / capacity) + vehicle_count_margin
+```
+
+变量 M 训练的数据流：
+
+```text
+VariableVehicleCVRPGenerator
+  -> 每个样本写入 num_vehicles = M_i
+  -> CVRPEnvWithVehicleCount.reset 保留该字段
+  -> Stage2Policy 按 batch 内 M_max 生成 logits
+  -> valid_vehicle mask 屏蔽 m >= M_i
+  -> RouteEvaluator 只对有效车辆计算 reward
+```
+
 ## 3. 数据与环境
 
 ### 3.1 CVRP 环境
@@ -962,3 +985,69 @@ AM 联合训练
 严格累计容量可行性
 完整的 Stage2 指标曲线
 ```
+
+## 10. 验证与基线（CVRP + LKH-3）
+
+训练过程中的 `reward` 只有一个标量，无法判断分簇质量的好坏（例如最长路径、
+总长度、容量超出量各自是多少）。`scripts/stage2/eval_cvrp.py` 提供独立的
+离线验证通路，在**固定测试集**上同时给出传统求解器基线和已训练分簇模型。
+
+### 10.1 传统求解器基线
+
+```bash
+python -m scripts.stage2.eval_cvrp \
+    --data-file data/cvrp100/test.npz \
+    --num-instances 100 \
+    --solvers lkh \
+    --objectives minsum minmax \
+    --lkh-path assets/solver/LKH-3.0.14/LKH \
+    --output assets/results/cvrp100_baseline.json
+```
+
+### 10.2 分簇模型 vs LKH-3
+
+```bash
+python -m scripts.stage2.eval_cvrp \
+    --data-file data/cvrp100/test.npz \
+    --num-instances 100 \
+    --solvers lkh \
+    --objectives minsum minmax \
+    --stage2-checkpoint logs/stage2/<run>/version_0/checkpoints/last.ckpt \
+    --route-model AttentionModel \
+    --route-checkpoint logs/stage1/TSPEnv-AttentionModel/version_0/checkpoints/last.ckpt \
+    --model-cluster-solver lkh \
+    --output assets/results/cvrp100_model_vs_lkh.json
+```
+
+`--model-cluster-solver lkh` 会用 LKH 重新求解模型划分出来的每个簇（对应论文里
+TAM-LKH3 的口径）；不带该参数时用冻结的 Stage1 模型评价，与训练时的奖励完全
+一致。
+
+### 10.3 指标口径
+
+| 字段 | 含义 |
+| --- | --- |
+| `max_route` | 最长单条路径长度，即 min-max 目标值 |
+| `total` | 全部路径长度之和 |
+| `mean_route` | 平均单条路径长度 |
+| `overflow` | 超过单车容量的装载量之和（模型解可能出现，LKH 解恒为 0） |
+| `num_routes` | 实际使用的车辆数 |
+| `seconds` | 单实例求解时间 |
+| `lkh_max_route` / `lkh_total` | 模型分簇再用 LKH 重算得到的值 |
+
+### 10.4 LKH 的 min-max 限制
+
+LKH-3 原生 CVRP 只有 min-sum 目标：
+
+- `TYPE: CVRP` + `MTSP_OBJECTIVE = MINMAX` 会被忽略（源码 `SRC/MTSP2TSP.c` 中
+  CVRP 固定使用 `Penalty_CVRP`）；
+- `TYPE: CCVRP` + `MINMAX` 优化的是另一套内部量（内部距离还扣除了势函数），
+  实测与真实最长路径不一致，不能当作 min-max 基线。
+
+因此 `utils/solvers/cvrp.py` 用 `DISTANCE = λ`（单车长度上限）+ 二分搜索逼近
+min-max 最优：先求 min-sum 解得到上界，下界取 `max_i 2·dist(depot, i)`，
+每次让步长减半并检查 LKH 是否给出满足 `最长路径 ≤ λ` 的可行解。
+
+穷举校验（6 客户、2-3 车，枚举全部划分与路径排列）：min-sum 精确命中 16/17，
+min-max 二分命中 14/17，最差相对偏差约 3.6%。所以 LKH 的 min-max 结果应当
+描述为“强启发式上界”，不能写成“理论最优”。

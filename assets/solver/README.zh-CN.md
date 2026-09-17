@@ -83,6 +83,33 @@ python -m scripts.stage1.eval_stage1 \
 - `--solver-num-procs`：评估时使用的工作进程数。
 - `--progress-interval`：进度和 ETA 输出间隔；设为 `0` 可关闭。
 
+## CVRP 基线（Stage2 验证）
+
+`utils/solvers/cvrp.py` 用同一个可执行文件求解带容量 VRP，
+`scripts/stage2/eval_cvrp.py` 则在 Stage2 测试集上批量评估：
+
+```bash
+python -m scripts.stage2.eval_cvrp \
+    --data-file data/cvrp100/test.npz \
+    --num-instances 100 \
+    --solvers lkh \
+    --objectives minsum minmax \
+    --lkh-path assets/solver/LKH-3.0.14/LKH \
+    --output assets/results/cvrp100_baseline.json
+```
+
+- `--objectives minsum`：LKH 原生 CVRP 目标，最小化总路径长度。
+- `--objectives minmax`：与 Stage2 奖励一致，最小化最长单条路径。LKH-3
+  **没有**原生 min-max CVRP 目标：`TYPE: CVRP` 下 `MTSP_OBJECTIVE = MINMAX`
+  会被忽略（见 `SRC/MTSP2TSP.c`），而 `TYPE: CCVRP` + `MINMAX` 优化的是另一套
+  内部量，并不对应实际路径长度。因此这里通过二分单车路径长度上限
+  （`DISTANCE = λ`）逼近 min-max 解。得到的是**强启发式上界，不是可证明最优**。
+- 路径长度、载重、容量超出量都在 Python 侧用坐标重新计算；LKH 打印的
+  `Cost` 使用的是内部变换量纲，不作为结果。
+
+正确性对照（6 个客户、2-3 辆车，穷举全部划分与路径排列）：min-sum 与精确最优
+在 17 个实例中命中 16 个；min-max 二分搜索命中 14 个，最差相对偏差约 3.6%。
+
 ## 可移植性
 
 当前二进制是针对编译机器的 CPU 生成的。如果迁移到其他 CPU 或操作系统环境

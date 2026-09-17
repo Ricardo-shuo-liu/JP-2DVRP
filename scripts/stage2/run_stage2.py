@@ -22,7 +22,11 @@ from utils.config import parse_key_value
 from utils.config.stage2 import Config
 from rl4co.envs import CVRPEnv
 
-from utils.data import FeasibleCVRPGenerator
+from utils.data import (
+    CVRPEnvWithVehicleCount,
+    FeasibleCVRPGenerator,
+    VariableVehicleCVRPGenerator,
+)
 
 
 def build_policy(config: Config):
@@ -36,10 +40,14 @@ def build_policy(config: Config):
         num_heads=config.num_heads,
         temperature=config.temperature,
     )
+    variable_vehicles = (
+        config.num_vehicles_min is not None
+        or config.num_vehicles_max is not None
+    )
     return Stage2Policy(
         partition_network=partition_network,
         route_evaluator=route_evaluator,
-        num_vehicles=config.num_vehicles,
+        num_vehicles=None if variable_vehicles else config.num_vehicles,
         objective=config.objective,
         penalty=config.penalty,
         capacity_mask_mode=config.capacity_mask_mode,
@@ -57,12 +65,36 @@ def build_model(config: Config):
     generator_params = dict(config.generator_params)
     if config.capacity is not None:
         generator_params["capacity"] = config.capacity
-    generator = FeasibleCVRPGenerator(
-        num_loc=config.num_loc,
-        num_vehicles=config.num_vehicles,
-        **generator_params,
+    variable_vehicles = (
+        config.num_vehicles_min is not None
+        or config.num_vehicles_max is not None
     )
-    env = CVRPEnv(
+    if variable_vehicles:
+        num_vehicles_min = config.num_vehicles_min
+        num_vehicles_max = config.num_vehicles_max
+        if num_vehicles_min is None or num_vehicles_max is None:
+            raise ValueError(
+                "变量车辆数模式需要同时指定 num_vehicles_min 和 num_vehicles_max"
+            )
+        generator = VariableVehicleCVRPGenerator(
+            num_loc=config.num_loc,
+            num_vehicles_min=num_vehicles_min,
+            num_vehicles_max=num_vehicles_max,
+            vehicle_count_margin=config.vehicle_count_margin,
+            **generator_params,
+        )
+        env_cls = CVRPEnvWithVehicleCount
+    else:
+        if config.num_vehicles is None:
+            raise ValueError("固定车辆数模式需要指定 num_vehicles")
+        generator = FeasibleCVRPGenerator(
+            num_loc=config.num_loc,
+            num_vehicles=config.num_vehicles,
+            **generator_params,
+        )
+        env_cls = CVRPEnv
+
+    env = env_cls(
         generator=generator,
         data_dir=config.data_dir,
         train_file=config.train_file,
@@ -93,6 +125,24 @@ def build_parser() -> ArgumentParser:
     parser.add_argument("--num-loc", type=int, default=defaults.num_loc)
     parser.add_argument("--capacity", type=float, default=defaults.capacity)
     parser.add_argument("--num-vehicles", type=int, default=defaults.num_vehicles)
+    parser.add_argument(
+        "--num-vehicles-min",
+        type=int,
+        default=defaults.num_vehicles_min,
+        help="变量车辆数模式的最小车辆数",
+    )
+    parser.add_argument(
+        "--num-vehicles-max",
+        type=int,
+        default=defaults.num_vehicles_max,
+        help="变量车辆数模式的最大车辆数",
+    )
+    parser.add_argument(
+        "--vehicle-count-margin",
+        type=int,
+        default=defaults.vehicle_count_margin,
+        help="最小可行车辆数上额外增加的余量",
+    )
     parser.add_argument(
         "--objective",
         default=defaults.objective,
@@ -229,10 +279,30 @@ def main():
     config = args_to_config(build_parser())
     if config.env != "CVRPEnv":
         raise SystemExit("Stage2 目前只支持 RL4CO CVRPEnv")
+    if (config.num_vehicles_min is None) != (
+        config.num_vehicles_max is None
+    ):
+        raise SystemExit(
+            "变量车辆数模式需要同时指定 --num-vehicles-min 和 --num-vehicles-max"
+        )
+    if config.num_vehicles_min is not None:
+        if config.num_vehicles_min < 1:
+            raise SystemExit("--num-vehicles-min 必须 >= 1")
+        if config.num_vehicles_max < config.num_vehicles_min:
+            raise SystemExit(
+                "--num-vehicles-max 必须 >= --num-vehicles-min"
+            )
 
     model = build_model(config)
-    print(f"开始 Stage2：{config.env}, num_loc={config.num_loc}, "
-          f"num_vehicles={config.num_vehicles}, objective={config.objective}")
+    vehicle_text = (
+        f"{config.num_vehicles_min}-{config.num_vehicles_max} (random)"
+        if config.num_vehicles_min is not None
+        else str(config.num_vehicles)
+    )
+    print(
+        f"开始 Stage2：{config.env}, num_loc={config.num_loc}, "
+        f"num_vehicles={vehicle_text}, objective={config.objective}"
+    )
     print(f"route model: {config.route_model}, route ckpt: {config.route_checkpoint}")
     print(config.to_dict())
 
