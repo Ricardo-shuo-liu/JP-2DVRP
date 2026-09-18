@@ -6,6 +6,7 @@ executable, so no Python LKH wrapper is required.
 
 from __future__ import annotations
 
+import itertools
 import math
 import os
 import shutil
@@ -245,6 +246,25 @@ def solve_tsp_lkh(
             actions=[0],
             seconds=0.0,
             status="trivial",
+        )
+    if n <= 3:
+        # LKH 要求 DIMENSION >= 3，两节点实例（仓库 + 单个客户）会直接报错；
+        # 这类超小规模直接精确枚举即可。
+        best_cost = math.inf
+        best_actions: list[int] = []
+        for perm in itertools.permutations(range(1, n)):
+            tour = [0, *perm]
+            cost = _tour_cost(point_set, tour)
+            if cost < best_cost:
+                best_cost = cost
+                best_actions = tour
+        return TSPClassicalResult(
+            solver="lkh3",
+            cost=float(best_cost),
+            actions=best_actions,
+            seconds=0.0,
+            status="trivial",
+            meta={"note": "n<=3 精确枚举（LKH 要求 DIMENSION>=3）"},
         )
 
     executable = find_lkh_executable(lkh_path)

@@ -23,3 +23,6 @@ logs/stage1/TSPEnv-POMO/version_0/checkpoints/last.ck
 1651_generalize_learned_heuristics_.pdf
 
 2405.17272v2.pdf
+
+logs/stage2/CVRPEnv-cluster/version_0/checkpoints/epoch_097.ckpt
+logs/stage2/CVRPEnv-cluster/version_0/checkpoints/last.ckpt

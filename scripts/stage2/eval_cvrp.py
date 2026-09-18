@@ -136,12 +136,20 @@ def _percentile(values: list[float], q: float) -> float:
     return float(np.percentile(np.asarray(values, dtype=np.float64), q))
 
 
+def _metric(record: dict[str, Any], names: tuple[str, ...]) -> float:
+    """按优先级取第一个存在的指标（lkh 精确值优先于 AM 估计值）。"""
+    for name in names:
+        if name in record:
+            return float(record[name])
+    return float("nan")
+
+
 def summarize(records: list[dict[str, Any]]) -> dict[str, Any]:
     ok = [r for r in records if r.get("status") == "success"]
     if not ok:
         return {"num_instances": len(records), "num_success": 0}
-    max_route = [float(r["max_route"]) for r in ok]
-    total = [float(r["total"]) for r in ok]
+    max_route = [_metric(r, ("lkh_max_route", "max_route", "am_max_route")) for r in ok]
+    total = [_metric(r, ("lkh_total", "total", "am_total")) for r in ok]
     seconds = [float(r["seconds"]) for r in ok]
     overflow = [float(r.get("overflow", 0.0)) for r in ok]
     return {
@@ -576,23 +584,22 @@ def evaluate_partitions(
                 "num_vehicles": int(vehicles),
                 "objective": objective,
                 "cluster_sizes": [len(cluster) for cluster in clusters],
-                "model_route_costs": [
+                # 注意：分簇结果没有“路径顺序”，因此这里给出的是**簇内 TSP 代价**，
+                # 由冻结 Stage1 模型估计（与训练口径一致），不是客户下标的顺序长度。
+                "am_route_costs": [
                     float(costs_t[vehicle]) for vehicle in vehicle_ids
                 ],
+                "am_max_route": (
+                    float(max(costs_t[vehicle] for vehicle in vehicle_ids))
+                    if vehicle_ids
+                    else 0.0
+                ),
+                "am_total": float(sum(costs_t[vehicle] for vehicle in vehicle_ids)),
             }
-            costs, loads, violation = evaluate_routes(
-                locs, demand, clusters, capacity
-            )
-            record.update(
-                {
-                    "max_route": float(max(costs)) if costs else 0.0,
-                    "total": float(sum(costs)),
-                    "mean_route": float(sum(costs) / len(costs)) if costs else 0.0,
-                    "route_costs": costs,
-                    "route_loads": loads,
-                    "overflow": violation,
-                }
-            )
+            _costs, loads, violation = evaluate_routes(locs, demand, clusters, capacity)
+            record["route_loads"] = loads
+            # overflow 统一用原始需求单位，和传统求解器记录保持一致
+            record["overflow"] = violation
             if args.model_cluster_solver == "lkh":
                 lkh_costs: list[float] = []
                 for cluster in clusters:
@@ -619,8 +626,8 @@ def evaluate_partitions(
                 record = methods[name]["instances"][-1]
                 print(
                     f"[{name}] {count}/{len(indices)} "
-                    f"max_route={record['max_route']:.4f} "
-                    f"total={record['total']:.4f} "
+                    f"max_route={_metric(record, ('lkh_max_route', 'max_route', 'am_max_route')):.4f} "
+                    f"total={_metric(record, ('lkh_total', 'total', 'am_total')):.4f} "
                     f"overflow={record['overflow']:.3f} "
                     f"sec={record['seconds']:.2f}",
                     flush=True,
@@ -826,7 +833,8 @@ def main() -> None:
             print(f"{name}: 无成功实例")
             continue
         print(
-            f"{name}: max_route_mean={summary['max_route_mean']:.4f} "
+            f"{name}: n_ok={summary['num_success']}/{summary['num_instances']} "
+            f"max_route_mean={summary['max_route_mean']:.4f} "
             f"total_mean={summary['total_mean']:.4f} "
             f"sec/instance={summary['seconds_mean']:.3f} "
             f"overflow_mean={summary['overflow_mean']:.4f}"
