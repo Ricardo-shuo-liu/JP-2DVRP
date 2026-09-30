@@ -132,7 +132,16 @@ def main():
     accepted_count = 0
     batch_size = min(1024, max(args.num_samples, 1))
 
+    rounds = 0
+    max_rounds = 500
     while accepted_count < args.num_samples:
+        rounds += 1
+        if rounds > max_rounds:
+            raise SystemExit(
+                f"生成失败：{max_rounds} 轮只收到 {accepted_count}/{args.num_samples} 条"
+                f"满足 sum(demand) <= num_vehicles * capacity 的实例。"
+                f"请增大 --num-vehicles 或 --capacity，或减少 --num-loc。"
+            )
         td = env.generator(batch_size)
         if variable_vehicles:
             mask = torch.ones(td.batch_size[0], dtype=torch.bool)

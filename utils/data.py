@@ -195,10 +195,14 @@ def save_td(td: TensorDict, path: str | Path, compress: bool = False) -> Path:
 
 
 def feasible_cvrp_mask(td: TensorDict, num_vehicles: int) -> torch.Tensor:
-    """Boolean mask of instances that can fit into ``num_vehicles`` vehicles."""
-    capacity = td["capacity"].squeeze(-1)
+    """Boolean mask of instances that can fit into ``num_vehicles`` vehicles.
+
+    注意：RL4CO CVRPGenerator 返回的 ``td["demand"]`` 已经按 capacity 归一化，
+    所以这里必须和 ``num_vehicles`` 比较（而不是 ``capacity * num_vehicles``，
+    后者会让条件恒真、过滤失效）。
+    """
     total_demand = td["demand"].sum(-1)
-    return total_demand <= capacity * num_vehicles
+    return total_demand <= num_vehicles + 1e-5
 
 
 def select_by_mask(td: TensorDict, mask: torch.Tensor) -> TensorDict:
